@@ -309,6 +309,11 @@ export class BaileysStartupService extends ChannelStartupService {
           );
         }
 
+        await this.prismaRepository.instance.update({
+          where: { id: this.instanceId },
+          data: { connectionStatus: 'close' },
+        });
+
         this.sendDataWebhook(Events.CONNECTION_UPDATE, {
           instance: this.instance.name,
           state: 'refused',
