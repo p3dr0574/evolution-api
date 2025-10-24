@@ -23,7 +23,7 @@ import { Chatwoot as ChatwootModel, Contact as ContactModel, Message as MessageM
 import i18next from '@utils/i18n';
 import { sendTelemetry } from '@utils/sendTelemetry';
 import axios from 'axios';
-import { proto } from 'baileys';
+import { WAMessageContent, WAMessageKey } from 'baileys';
 import dayjs from 'dayjs';
 import FormData from 'form-data';
 import { Jimp, JimpMime } from 'jimp';
@@ -42,6 +42,9 @@ interface ChatwootMessage {
 
 export class ChatwootService {
   private readonly logger = new Logger('ChatwootService');
+
+  // Lock polling delay
+  private readonly LOCK_POLLING_DELAY_MS = 300; // Delay between lock status checks
 
   private provider: any;
 
@@ -129,7 +132,7 @@ export class ChatwootService {
   public async find(instance: InstanceDto): Promise<ChatwootDto> {
     try {
       return await this.waMonitor.waInstances[instance.instanceName].findChatwoot();
-    } catch (error) {
+    } catch {
       this.logger.error('chatwoot not found');
       return { enabled: null, url: '' };
     }
@@ -369,7 +372,7 @@ export class ChatwootService {
       });
 
       return contact;
-    } catch (error) {
+    } catch {
       return null;
     }
   }
@@ -406,7 +409,7 @@ export class ChatwootService {
       }
 
       return true;
-    } catch (error) {
+    } catch {
       return false;
     }
   }
@@ -567,34 +570,31 @@ export class ChatwootService {
   }
 
   public async createConversation(instance: InstanceDto, body: any) {
-    if (!body?.key) {
-      this.logger.warn(
-        `body.key is null or undefined in createConversation. Full body object: ${JSON.stringify(body)}`,
-      );
-      return null;
-    }
-
-    const isLid = body.key.previousRemoteJid?.includes('@lid') && body.key.senderPn;
-    const remoteJid = body.key.remoteJid;
+    const isLid = body.key.addressingMode === 'lid';
+    const isGroup = body.key.remoteJid.endsWith('@g.us');
+    const phoneNumber = isLid && !isGroup ? body.key.remoteJidAlt : body.key.remoteJid;
+    const { remoteJid } = body.key;
     const cacheKey = `${instance.instanceName}:createConversation-${remoteJid}`;
     const lockKey = `${instance.instanceName}:lock:createConversation-${remoteJid}`;
-    const maxWaitTime = 5000; // 5 secounds
+    const maxWaitTime = 5000; // 5 seconds
+    const client = await this.clientCw(instance);
+    if (!client) return null;
 
     try {
       // Processa atualização de contatos já criados @lid
-      if (isLid && body.key.senderPn !== body.key.previousRemoteJid) {
-        const contact = await this.findContact(instance, body.key.remoteJid.split('@')[0]);
-        if (contact && contact.identifier !== body.key.senderPn) {
+      if (phoneNumber && remoteJid && !isGroup) {
+        const contact = await this.findContact(instance, phoneNumber.split('@')[0]);
+        if (contact && contact.identifier !== remoteJid) {
           this.logger.verbose(
-            `Identifier needs update: (contact.identifier: ${contact.identifier}, body.key.remoteJid: ${body.key.remoteJid}, body.key.senderPn: ${body.key.senderPn}`,
+            `Identifier needs update: (contact.identifier: ${contact.identifier}, phoneNumber: ${phoneNumber}, body.key.remoteJidAlt: ${remoteJid}`,
           );
           const updateContact = await this.updateContact(instance, contact.id, {
-            identifier: body.key.senderPn,
-            phone_number: `+${body.key.senderPn.split('@')[0]}`,
+            identifier: remoteJid,
+            phone_number: `+${phoneNumber.split('@')[0]}`,
           });
 
           if (updateContact === null) {
-            const baseContact = await this.findContact(instance, body.key.senderPn.split('@')[0]);
+            const baseContact = await this.findContact(instance, phoneNumber.split('@')[0]);
             if (baseContact) {
               await this.mergeContacts(baseContact.id, contact.id);
               this.logger.verbose(
@@ -610,7 +610,23 @@ export class ChatwootService {
       // If it already exists in the cache, return conversationId
       if (await this.cache.has(cacheKey)) {
         const conversationId = (await this.cache.get(cacheKey)) as number;
-        this.logger.verbose(`Found conversation to: ${remoteJid}, conversation ID: ${conversationId}`);
+        this.logger.verbose(`Found conversation to: ${phoneNumber}, conversation ID: ${conversationId}`);
+        let conversationExists: conversation | boolean;
+        try {
+          conversationExists = await client.conversations.get({
+            accountId: this.provider.accountId,
+            conversationId: conversationId,
+          });
+          this.logger.verbose(`Conversation exists: ${JSON.stringify(conversationExists)}`);
+        } catch (error) {
+          this.logger.error(`Error getting conversation: ${error}`);
+          conversationExists = false;
+        }
+        if (!conversationExists) {
+          this.logger.verbose('Conversation does not exist, re-calling createConversation');
+          this.cache.delete(cacheKey);
+          return await this.createConversation(instance, body);
+        }
         return conversationId;
       }
 
@@ -623,7 +639,7 @@ export class ChatwootService {
             this.logger.warn(`Timeout aguardando lock para ${remoteJid}`);
             break;
           }
-          await new Promise((res) => setTimeout(res, 300));
+          await new Promise((res) => setTimeout(res, this.LOCK_POLLING_DELAY_MS));
           if (await this.cache.has(cacheKey)) {
             const conversationId = (await this.cache.get(cacheKey)) as number;
             this.logger.verbose(`Resolves creation of: ${remoteJid}, conversation ID: ${conversationId}`);
@@ -645,11 +661,7 @@ export class ChatwootService {
           return (await this.cache.get(cacheKey)) as number;
         }
 
-        const client = await this.clientCw(instance);
-        if (!client) return null;
-
-        const isGroup = remoteJid.includes('@g.us');
-        const chatId = isGroup ? remoteJid : remoteJid.split('@')[0];
+        const chatId = isGroup ? remoteJid : phoneNumber.split('@')[0].split(':')[0];
         let nameContact = !body.key.fromMe ? body.pushName : chatId;
         const filterInbox = await this.getInbox(instance);
         if (!filterInbox) return null;
@@ -659,14 +671,15 @@ export class ChatwootService {
           const group = await this.waMonitor.waInstances[instance.instanceName].client.groupMetadata(chatId);
           this.logger.verbose(`Group metadata: ${JSON.stringify(group)}`);
 
+          const participantJid = isLid && !body.key.fromMe ? body.key.participantAlt : body.key.participant;
           nameContact = `${group.subject} (GROUP)`;
 
           const picture_url = await this.waMonitor.waInstances[instance.instanceName].profilePicture(
-            body.key.participant.split('@')[0],
+            participantJid.split('@')[0],
           );
           this.logger.verbose(`Participant profile picture URL: ${JSON.stringify(picture_url)}`);
 
-          const findParticipant = await this.findContact(instance, body.key.participant.split('@')[0]);
+          const findParticipant = await this.findContact(instance, participantJid.split('@')[0]);
           this.logger.verbose(`Found participant: ${JSON.stringify(findParticipant)}`);
 
           if (findParticipant) {
@@ -679,12 +692,12 @@ export class ChatwootService {
           } else {
             await this.createContact(
               instance,
-              body.key.participant.split('@')[0],
+              participantJid.split('@')[0],
               filterInbox.id,
               false,
               body.pushName,
               picture_url.profilePictureUrl || null,
-              body.key.participant,
+              participantJid,
             );
           }
         }
@@ -692,6 +705,7 @@ export class ChatwootService {
         const picture_url = await this.waMonitor.waInstances[instance.instanceName].profilePicture(chatId);
         this.logger.verbose(`Contact profile picture URL: ${JSON.stringify(picture_url)}`);
 
+        this.logger.verbose(`Searching contact for: ${chatId}`);
         let contact = await this.findContact(instance, chatId);
 
         if (contact) {
@@ -775,7 +789,7 @@ export class ChatwootService {
 
           if (inboxConversation) {
             this.logger.verbose(`Returning existing conversation ID: ${inboxConversation.id}`);
-            this.cache.set(cacheKey, inboxConversation.id);
+            this.cache.set(cacheKey, inboxConversation.id, 8 * 3600);
             return inboxConversation.id;
           }
         }
@@ -808,7 +822,7 @@ export class ChatwootService {
         }
 
         this.logger.verbose(`New conversation created of ${remoteJid} with ID: ${conversation.id}`);
-        this.cache.set(cacheKey, conversation.id);
+        this.cache.set(cacheKey, conversation.id, 8 * 3600);
         return conversation.id;
       } finally {
         await this.cache.delete(lockKey);
@@ -1164,7 +1178,7 @@ export class ChatwootService {
         const data: SendAudioDto = {
           number: number,
           audio: media,
-          delay: 1200,
+          delay: Math.floor(Math.random() * (2000 - 500 + 1)) + 500,
           quoted: options?.quoted,
         };
 
@@ -1175,7 +1189,7 @@ export class ChatwootService {
         return messageSent;
       }
 
-      const documentExtensions = ['.gif', '.svg', '.tiff', '.tif'];
+      const documentExtensions = ['.gif', '.svg', '.tiff', '.tif', '.dxf', '.dwg'];
       if (type === 'image' && parsedMedia && documentExtensions.includes(parsedMedia?.ext)) {
         type = 'document';
       }
@@ -1200,6 +1214,7 @@ export class ChatwootService {
       return messageSent;
     } catch (error) {
       this.logger.error(error);
+      throw error; // Re-throw para que o erro seja tratado pelo caller
     }
   }
 
@@ -1281,6 +1296,7 @@ export class ChatwootService {
 
       const senderName = body?.conversation?.messages[0]?.sender?.available_name || body?.sender?.name;
       const waInstance = this.waMonitor.waInstances[instance.instanceName];
+      instance.instanceId = waInstance.instanceId;
 
       if (body.event === 'message_updated' && body.content_attributes?.deleted) {
         const message = await this.prismaRepository.message.findFirst({
@@ -1291,12 +1307,7 @@ export class ChatwootService {
         });
 
         if (message) {
-          const key = message.key as {
-            id: string;
-            remoteJid: string;
-            fromMe: boolean;
-            participant: string;
-          };
+          const key = message.key as WAMessageKey;
 
           await waInstance?.client.sendMessage(key.remoteJid, { delete: key });
 
@@ -1381,7 +1392,10 @@ export class ChatwootService {
       }
 
       if (body.message_type === 'outgoing' && body?.conversation?.messages?.length && chatId !== '123456') {
-        if (body?.conversation?.messages[0]?.source_id?.substring(0, 5) === 'WAID:') {
+        if (
+          body?.conversation?.messages[0]?.source_id?.substring(0, 5) === 'WAID:' &&
+          body?.conversation?.messages[0]?.id === body?.id
+        ) {
           return { message: 'bot' };
         }
 
@@ -1428,7 +1442,6 @@ export class ChatwootService {
               await this.updateChatwootMessageId(
                 {
                   ...messageSent,
-                  owner: instance.instanceName,
                 },
                 {
                   messageId: body.id,
@@ -1443,7 +1456,7 @@ export class ChatwootService {
             const data: SendTextDto = {
               number: chatId,
               text: formatText,
-              delay: 1200,
+              delay: Math.floor(Math.random() * (2000 - 500 + 1)) + 500,
               quoted: await this.getQuotedMessage(body, instance),
             };
 
@@ -1463,7 +1476,6 @@ export class ChatwootService {
               await this.updateChatwootMessageId(
                 {
                   ...messageSent,
-                  instanceId: instance.instanceId,
                 },
                 {
                   messageId: body.id,
@@ -1494,12 +1506,7 @@ export class ChatwootService {
             },
           });
           if (lastMessage && !lastMessage.chatwootIsRead) {
-            const key = lastMessage.key as {
-              id: string;
-              fromMe: boolean;
-              remoteJid: string;
-              participant?: string;
-            };
+            const key = lastMessage.key as WAMessageKey;
 
             waInstance?.markMessageAsRead({
               readMessages: [
@@ -1536,7 +1543,7 @@ export class ChatwootService {
         const data: SendTextDto = {
           number: chatId,
           text: body.content.replace(/\\\r\n|\\\n|\n/g, '\n'),
-          delay: 1200,
+          delay: Math.floor(Math.random() * (2000 - 500 + 1)) + 500,
         };
 
         sendTelemetry('/message/sendText');
@@ -1557,33 +1564,26 @@ export class ChatwootService {
     chatwootMessageIds: ChatwootMessage,
     instance: InstanceDto,
   ) {
-    const key = message.key as {
-      id: string;
-      fromMe: boolean;
-      remoteJid: string;
-      participant?: string;
-    };
+    const key = message.key as WAMessageKey;
 
     if (!chatwootMessageIds.messageId || !key?.id) {
       return;
     }
 
-    await this.prismaRepository.message.updateMany({
-      where: {
-        key: {
-          path: ['id'],
-          equals: key.id,
-        },
-        instanceId: instance.instanceId,
-      },
-      data: {
-        chatwootMessageId: chatwootMessageIds.messageId,
-        chatwootConversationId: chatwootMessageIds.conversationId,
-        chatwootInboxId: chatwootMessageIds.inboxId,
-        chatwootContactInboxSourceId: chatwootMessageIds.contactInboxSourceId,
-        chatwootIsRead: chatwootMessageIds.isRead,
-      },
-    });
+    // Use raw SQL to avoid JSON path issues
+    const result = await this.prismaRepository.$executeRaw`
+      UPDATE "Message" 
+      SET 
+        "chatwootMessageId" = ${chatwootMessageIds.messageId},
+        "chatwootConversationId" = ${chatwootMessageIds.conversationId},
+        "chatwootInboxId" = ${chatwootMessageIds.inboxId},
+        "chatwootContactInboxSourceId" = ${chatwootMessageIds.contactInboxSourceId},
+        "chatwootIsRead" = ${chatwootMessageIds.isRead || false}
+      WHERE "instanceId" = ${instance.instanceId} 
+      AND "key"->>'id' = ${key.id}
+    `;
+
+    this.logger.verbose(`Update result: ${result} rows affected`);
 
     if (this.isImportHistoryAvailable()) {
       chatwootImport.updateMessageSourceID(chatwootMessageIds.messageId, key.id);
@@ -1591,17 +1591,15 @@ export class ChatwootService {
   }
 
   private async getMessageByKeyId(instance: InstanceDto, keyId: string): Promise<MessageModel> {
-    const messages = await this.prismaRepository.message.findFirst({
-      where: {
-        key: {
-          path: ['id'],
-          equals: keyId,
-        },
-        instanceId: instance.instanceId,
-      },
-    });
+    // Use raw SQL query to avoid JSON path issues with Prisma
+    const messages = await this.prismaRepository.$queryRaw`
+      SELECT * FROM "Message" 
+      WHERE "instanceId" = ${instance.instanceId} 
+      AND "key"->>'id' = ${keyId}
+      LIMIT 1
+    `;
 
-    return messages || null;
+    return (messages as MessageModel[])[0] || null;
   }
 
   private async getReplyToIds(
@@ -1636,17 +1634,13 @@ export class ChatwootService {
         },
       });
 
-      const key = message?.key as {
-        id: string;
-        fromMe: boolean;
-        remoteJid: string;
-        participant?: string;
-      };
+      const key = message?.key as WAMessageKey;
+      const messageContent = message?.message as WAMessageContent;
 
-      if (message && key?.id) {
+      if (messageContent && key?.id) {
         return {
-          key: message.key as proto.IMessageKey,
-          message: message.message as proto.IMessage,
+          key: key,
+          message: messageContent,
         };
       }
     }
@@ -1900,12 +1894,6 @@ export class ChatwootService {
 
   public async eventWhatsapp(event: string, instance: InstanceDto, body: any) {
     try {
-      // Ignore events that are not messages (like EPHEMERAL_SYNC_RESPONSE)
-      if (body?.type && body.type !== 'message' && body.type !== 'conversation') {
-        this.logger.verbose(`Ignoring non-message event type: ${body.type}`);
-        return;
-      }
-
       const waInstance = this.waMonitor.waInstances[instance.instanceName];
 
       if (!waInstance) {
@@ -1951,11 +1939,7 @@ export class ChatwootService {
       }
 
       if (event === 'messages.upsert' || event === 'send.message') {
-        if (!body?.key) {
-          this.logger.warn(`body.key is null or undefined. Full body object: ${JSON.stringify(body)}`);
-          return;
-        }
-
+        this.logger.info(`[${event}] New message received - Instance: ${JSON.stringify(body, null, 2)}`);
         if (body.key.remoteJid === 'status@broadcast') {
           return;
         }
@@ -2046,7 +2030,10 @@ export class ChatwootService {
 
           if (body.key.remoteJid.includes('@g.us')) {
             const participantName = body.pushName;
-            const rawPhoneNumber = body.key.participant.split('@')[0];
+            const rawPhoneNumber =
+              body.key.addressingMode === 'lid' && !body.key.fromMe
+                ? body.key.participantAlt.split('@')[0]
+                : body.key.participant.split('@')[0];
             const phoneMatch = rawPhoneNumber.match(/^(\d{2})(\d{2})(\d{4})(\d{4})$/);
 
             let formattedPhoneNumber: string;
@@ -2060,9 +2047,11 @@ export class ChatwootService {
             let content: string;
 
             if (!body.key.fromMe) {
-              content = `**${formattedPhoneNumber} - ${participantName}:**\n\n${bodyMessage}`;
+              content = bodyMessage
+                ? `**${formattedPhoneNumber} - ${participantName}:**\n\n${bodyMessage}`
+                : `**${formattedPhoneNumber} - ${participantName}:**`;
             } else {
-              content = `${bodyMessage}`;
+              content = bodyMessage || '';
             }
 
             const send = await this.sendData(
@@ -2187,7 +2176,10 @@ export class ChatwootService {
 
         if (body.key.remoteJid.includes('@g.us')) {
           const participantName = body.pushName;
-          const rawPhoneNumber = body.key.participant.split('@')[0];
+          const rawPhoneNumber =
+            body.key.addressingMode === 'lid' && !body.key.fromMe
+              ? body.key.participantAlt.split('@')[0]
+              : body.key.participant.split('@')[0];
           const phoneMatch = rawPhoneNumber.match(/^(\d{2})(\d{2})(\d{4})(\d{4})$/);
 
           let formattedPhoneNumber: string;
@@ -2278,33 +2270,23 @@ export class ChatwootService {
       }
 
       if (event === 'messages.edit' || event === 'send.message.update') {
-        // Ignore events that are not messages (like EPHEMERAL_SYNC_RESPONSE)
-        if (body?.type && body.type !== 'message') {
-          this.logger.verbose(`Ignoring non-message event type: ${body.type}`);
+        const editedMessageContent =
+          body?.editedMessage?.conversation || body?.editedMessage?.extendedTextMessage?.text;
+        const message = await this.getMessageByKeyId(instance, body?.key?.id);
+
+        if (!message) {
+          this.logger.warn('Message not found for edit event');
           return;
         }
 
-        if (!body?.key?.id) {
-          this.logger.warn(
-            `body.key.id is null or undefined in messages.edit. Full body object: ${JSON.stringify(body)}`,
-          );
-          return;
-        }
-
-        const editedText = `${
-          body?.editedMessage?.conversation || body?.editedMessage?.extendedTextMessage?.text
-        }\n\n_\`${i18next.t('cw.message.edited')}.\`_`;
-        const message = await this.getMessageByKeyId(instance, body.key.id);
-        const key = message.key as {
-          id: string;
-          fromMe: boolean;
-          remoteJid: string;
-          participant?: string;
-        };
+        const key = message.key as WAMessageKey;
 
         const messageType = key?.fromMe ? 'outgoing' : 'incoming';
 
-        if (message && message.chatwootConversationId) {
+        if (message && message.chatwootConversationId && message.chatwootMessageId) {
+          // Criar nova mensagem com formato: "Mensagem editada:\n\nteste1"
+          const editedText = `\n\n\`${i18next.t('cw.message.edited')}:\`\n\n${editedMessageContent}`;
+
           const send = await this.createMessage(
             instance,
             message.chatwootConversationId,
@@ -2382,15 +2364,30 @@ export class ChatwootService {
         await this.createBotMessage(instance, msgStatus, 'incoming');
       }
 
-      if (event === 'connection.update') {
-        if (body.status === 'open') {
-          // if we have qrcode count then we understand that a new connection was established
-          if (this.waMonitor.waInstances[instance.instanceName].qrCode.count > 0) {
-            const msgConnection = i18next.t('cw.inbox.connected');
-            await this.createBotMessage(instance, msgConnection, 'incoming');
-            this.waMonitor.waInstances[instance.instanceName].qrCode.count = 0;
-            chatwootImport.clearAll(instance);
-          }
+      if (event === 'connection.update' && body.status === 'open') {
+        const waInstance = this.waMonitor.waInstances[instance.instanceName];
+        if (!waInstance) return;
+
+        const now = Date.now();
+        const timeSinceLastNotification = now - (waInstance.lastConnectionNotification || 0);
+
+        // Se a conexão foi estabelecida via QR code, notifica imediatamente.
+        if (waInstance.qrCode && waInstance.qrCode.count > 0) {
+          const msgConnection = i18next.t('cw.inbox.connected');
+          await this.createBotMessage(instance, msgConnection, 'incoming');
+          waInstance.qrCode.count = 0;
+          waInstance.lastConnectionNotification = now;
+          chatwootImport.clearAll(instance);
+        }
+        // Se não foi via QR code, verifica o throttling.
+        else if (timeSinceLastNotification >= 30000) {
+          const msgConnection = i18next.t('cw.inbox.connected');
+          await this.createBotMessage(instance, msgConnection, 'incoming');
+          waInstance.lastConnectionNotification = now;
+        } else {
+          this.logger.warn(
+            `Connection notification skipped for ${instance.instanceName} - too frequent (${timeSinceLastNotification}ms since last)`,
+          );
         }
       }
 
@@ -2578,7 +2575,7 @@ export class ChatwootService {
       const savedMessages = await this.prismaRepository.message.findMany({
         where: {
           Instance: { name: instance.instanceName },
-          messageTimestamp: { gte: dayjs().subtract(6, 'hours').unix() },
+          messageTimestamp: { gte: Number(dayjs().subtract(6, 'hours').unix()) },
           AND: ids.map((id) => ({ key: { path: ['id'], not: id } })),
         },
       });
@@ -2607,7 +2604,7 @@ export class ChatwootService {
       await chatwootImport.importHistoryMessages(instance, this, inbox, this.provider);
       const waInstance = this.waMonitor.waInstances[instance.instanceName];
       waInstance.clearCacheChatwoot();
-    } catch (error) {
+    } catch {
       return;
     }
   }
