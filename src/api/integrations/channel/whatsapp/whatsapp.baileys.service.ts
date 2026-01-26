@@ -3414,48 +3414,57 @@ export class BaileysStartupService extends ChannelStartupService {
     ['random', 'EVP'],
   ]);
 
-  public async buttonMessage(data: SendButtonsDto) {
-  if (data.buttons.length === 0) {
+  aqui?
+
+public async buttonMessage(data: SendButtonsDto) {
+  if (!data.buttons || data.buttons.length === 0) {
     throw new BadRequestException('At least one button is required');
   }
 
   const hasReplyButtons = data.buttons.some((btn) => btn.type === 'reply');
   const hasPixButton = data.buttons.some((btn) => btn.type === 'pix');
-  const hasOtherButtons = data.buttons.some((btn) => btn.type !== 'reply' && btn.type !== 'pix');
+  const hasCTAButtons = data.buttons.some(
+    (btn) => btn.type === 'url' || btn.type === 'call' || btn.type === 'copy',
+  );
 
-  // Reply rules
+  /* =========================
+   * REGRAS DE VALIDAÇÃO
+   * ========================= */
+
+  // Reply
   if (hasReplyButtons) {
     if (data.buttons.length > 3) {
       throw new BadRequestException('Maximum of 3 reply buttons allowed');
     }
-    if (hasOtherButtons) {
-      throw new BadRequestException('Reply buttons cannot be mixed with other button types');
+    if (hasCTAButtons || hasPixButton) {
+      throw new BadRequestException('Reply buttons cannot be mixed with CTA or PIX buttons');
     }
   }
 
-  // CTA rules (url/call/copy) - WhatsApp limits to 2 CTAs
-  if (hasOtherButtons && !hasReplyButtons && !hasPixButton) {
-    if (data.buttons.length > 2) {
-      throw new BadRequestException('Maximum of 2 CTA buttons allowed (url/call/copy)');
-    }
-  }
-
-  // PIX rules
+  // PIX
   if (hasPixButton) {
     if (data.buttons.length > 1) {
       throw new BadRequestException('Only one PIX button is allowed');
     }
-    if (hasOtherButtons) {
+    if (hasReplyButtons || hasCTAButtons) {
       throw new BadRequestException('PIX button cannot be mixed with other button types');
     }
 
     const message: proto.IMessage = {
-      deviceSentMessage: {
+      viewOnceMessage: {
         message: {
           interactiveMessage: {
             nativeFlowMessage: {
-              buttons: [{ name: this.mapType.get('pix'), buttonParamsJson: this.toJSONString(data.buttons[0]) }],
-              messageParamsJson: JSON.stringify({ from: 'api', templateId: v4() }),
+              buttons: [
+                {
+                  name: this.mapType.get('pix'),
+                  buttonParamsJson: this.toJSONString(data.buttons[0]),
+                },
+              ],
+              messageParamsJson: JSON.stringify({
+                from: 'api',
+                templateId: v4(),
+              }),
             },
           },
         },
@@ -3471,43 +3480,63 @@ export class BaileysStartupService extends ChannelStartupService {
     });
   }
 
-  const generate = await (async () => {
-    if (data?.thumbnailUrl) {
-      return await this.prepareMediaMessage({ mediatype: 'image', media: data.thumbnailUrl });
+  // CTA (url / call / copy)
+  if (hasCTAButtons) {
+    if (data.buttons.length > 2) {
+      throw new BadRequestException('Maximum of 2 CTA buttons allowed');
     }
-  })();
+    if (hasReplyButtons) {
+      throw new BadRequestException('CTA buttons cannot be mixed with reply buttons');
+    }
+  }
 
-  const buttons = data.buttons.map((value) => {
-    return { name: this.mapType.get(value.type), buttonParamsJson: this.toJSONString(value) };
-  });
+  /* =========================
+   * HEADER (opcional)
+   * ========================= */
+
+  const generatedMedia = data?.thumbnailUrl
+    ? await this.prepareMediaMessage({ mediatype: 'image', media: data.thumbnailUrl })
+    : null;
+
+  /* =========================
+   * BOTÕES
+   * ========================= */
+
+  const buttons = data.buttons.map((btn) => ({
+    name: this.mapType.get(btn.type),
+    buttonParamsJson: this.toJSONString(btn),
+  }));
+
+  /* =========================
+   * MENSAGEM FINAL
+   * ========================= */
 
   const message: proto.IMessage = {
-    deviceSentMessage: {
+    viewOnceMessage: {
       message: {
         interactiveMessage: {
           body: {
             text: (() => {
-              let t = '*' + data.title + '*';
+              let text = `*${data.title}*`;
               if (data?.description) {
-                t += '\n\n';
-                t += data.description;
-                t += '\n';
+                text += `\n\n${data.description}`;
               }
-              return t;
+              return text;
             })(),
           },
-          footer: { text: data?.footer },
-          header: (() => {
-            if (generate?.message?.imageMessage) {
-              return {
-                hasMediaAttachment: !!generate.message.imageMessage,
-                imageMessage: generate.message.imageMessage,
-              };
-            }
-          })(),
+          footer: data?.footer ? { text: data.footer } : undefined,
+          header: generatedMedia?.message?.imageMessage
+            ? {
+                hasMediaAttachment: true,
+                imageMessage: generatedMedia.message.imageMessage,
+              }
+            : undefined,
           nativeFlowMessage: {
             buttons,
-            messageParamsJson: JSON.stringify({ from: 'api', templateId: v4() }),
+            messageParamsJson: JSON.stringify({
+              from: 'api',
+              templateId: v4(),
+            }),
           },
         },
       },
