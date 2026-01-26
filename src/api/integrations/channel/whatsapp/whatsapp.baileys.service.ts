@@ -3415,91 +3415,46 @@ export class BaileysStartupService extends ChannelStartupService {
   ]);
 
   public async buttonMessage(data: SendButtonsDto) {
-    if (data.buttons.length === 0) {
-      throw new BadRequestException('At least one button is required');
+  if (data.buttons.length === 0) {
+    throw new BadRequestException('At least one button is required');
+  }
+
+  const hasReplyButtons = data.buttons.some((btn) => btn.type === 'reply');
+  const hasPixButton = data.buttons.some((btn) => btn.type === 'pix');
+  const hasOtherButtons = data.buttons.some((btn) => btn.type !== 'reply' && btn.type !== 'pix');
+
+  // Reply rules
+  if (hasReplyButtons) {
+    if (data.buttons.length > 3) {
+      throw new BadRequestException('Maximum of 3 reply buttons allowed');
     }
-
-    const hasReplyButtons = data.buttons.some((btn) => btn.type === 'reply');
-
-    const hasPixButton = data.buttons.some((btn) => btn.type === 'pix');
-
-    const hasOtherButtons = data.buttons.some((btn) => btn.type !== 'reply' && btn.type !== 'pix');
-
-    if (hasReplyButtons) {
-      if (data.buttons.length > 3) {
-        throw new BadRequestException('Maximum of 3 reply buttons allowed');
-      }
-      if (hasOtherButtons) {
-        throw new BadRequestException('Reply buttons cannot be mixed with other button types');
-      }
+    if (hasOtherButtons) {
+      throw new BadRequestException('Reply buttons cannot be mixed with other button types');
     }
+  }
 
-    if (hasPixButton) {
-      if (data.buttons.length > 1) {
-        throw new BadRequestException('Only one PIX button is allowed');
-      }
-      if (hasOtherButtons) {
-        throw new BadRequestException('PIX button cannot be mixed with other button types');
-      }
-
-      const message: proto.IMessage = {
-        viewOnceMessage: {
-          message: {
-            interactiveMessage: {
-              nativeFlowMessage: {
-                buttons: [{ name: this.mapType.get('pix'), buttonParamsJson: this.toJSONString(data.buttons[0]) }],
-                messageParamsJson: JSON.stringify({ from: 'api', templateId: v4() }),
-              },
-            },
-          },
-        },
-      };
-
-      return await this.sendMessageWithTyping(data.number, message, {
-        delay: data?.delay,
-        presence: 'composing',
-        quoted: data?.quoted,
-        mentionsEveryOne: data?.mentionsEveryOne,
-        mentioned: data?.mentioned,
-      });
+  // CTA rules (url/call/copy) - WhatsApp limits to 2 CTAs
+  if (hasOtherButtons && !hasReplyButtons && !hasPixButton) {
+    if (data.buttons.length > 2) {
+      throw new BadRequestException('Maximum of 2 CTA buttons allowed (url/call/copy)');
     }
+  }
 
-    const generate = await (async () => {
-      if (data?.thumbnailUrl) {
-        return await this.prepareMediaMessage({ mediatype: 'image', media: data.thumbnailUrl });
-      }
-    })();
-
-    const buttons = data.buttons.map((value) => {
-      return { name: this.mapType.get(value.type), buttonParamsJson: this.toJSONString(value) };
-    });
+  // PIX rules
+  if (hasPixButton) {
+    if (data.buttons.length > 1) {
+      throw new BadRequestException('Only one PIX button is allowed');
+    }
+    if (hasOtherButtons) {
+      throw new BadRequestException('PIX button cannot be mixed with other button types');
+    }
 
     const message: proto.IMessage = {
-      viewOnceMessage: {
+      deviceSentMessage: {
         message: {
           interactiveMessage: {
-            body: {
-              text: (() => {
-                let t = '*' + data.title + '*';
-                if (data?.description) {
-                  t += '\n\n';
-                  t += data.description;
-                  t += '\n';
-                }
-                return t;
-              })(),
-            },
-            footer: { text: data?.footer },
-            header: (() => {
-              if (generate?.message?.imageMessage) {
-                return {
-                  hasMediaAttachment: !!generate.message.imageMessage,
-                  imageMessage: generate.message.imageMessage,
-                };
-              }
-            })(),
             nativeFlowMessage: {
-              buttons: buttons,
+              buttons: [{ name: this.mapType.get('pix'), buttonParamsJson: this.toJSONString(data.buttons[0]) }],
               messageParamsJson: JSON.stringify({ from: 'api', templateId: v4() }),
             },
           },
@@ -3515,6 +3470,58 @@ export class BaileysStartupService extends ChannelStartupService {
       mentioned: data?.mentioned,
     });
   }
+
+  const generate = await (async () => {
+    if (data?.thumbnailUrl) {
+      return await this.prepareMediaMessage({ mediatype: 'image', media: data.thumbnailUrl });
+    }
+  })();
+
+  const buttons = data.buttons.map((value) => {
+    return { name: this.mapType.get(value.type), buttonParamsJson: this.toJSONString(value) };
+  });
+
+  const message: proto.IMessage = {
+    deviceSentMessage: {
+      message: {
+        interactiveMessage: {
+          body: {
+            text: (() => {
+              let t = '*' + data.title + '*';
+              if (data?.description) {
+                t += '\n\n';
+                t += data.description;
+                t += '\n';
+              }
+              return t;
+            })(),
+          },
+          footer: { text: data?.footer },
+          header: (() => {
+            if (generate?.message?.imageMessage) {
+              return {
+                hasMediaAttachment: !!generate.message.imageMessage,
+                imageMessage: generate.message.imageMessage,
+              };
+            }
+          })(),
+          nativeFlowMessage: {
+            buttons,
+            messageParamsJson: JSON.stringify({ from: 'api', templateId: v4() }),
+          },
+        },
+      },
+    },
+  };
+
+  return await this.sendMessageWithTyping(data.number, message, {
+    delay: data?.delay,
+    presence: 'composing',
+    quoted: data?.quoted,
+    mentionsEveryOne: data?.mentionsEveryOne,
+    mentioned: data?.mentioned,
+  });
+}
 
   public async locationMessage(data: SendLocationDto) {
     return await this.sendMessageWithTyping(
