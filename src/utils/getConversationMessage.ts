@@ -49,13 +49,17 @@ const getTypeMessage = (msg: any) => {
             : ''
         }`
       : undefined,
-    
+
     // --- FIX FACEBOOK ADS START ---
     externalAdReplyBody: msg?.message?.extendedTextMessage?.contextInfo?.externalAdReply?.body
       ? `externalAdReplyBody|${msg.message.extendedTextMessage.contextInfo.externalAdReply.body}`
       : msg?.message?.extendedTextMessage?.contextInfo?.externalAdReply?.title
-      ? `externalAdReplyBody|${msg.message.extendedTextMessage.contextInfo.externalAdReply.title}`
-      : undefined,
+        ? `externalAdReplyBody|${msg.message.extendedTextMessage.contextInfo.externalAdReply.title}`
+        : msg?.contextInfo?.externalAdReply?.body
+          ? `externalAdReplyBody|${msg.contextInfo.externalAdReply.body}`
+          : msg?.contextInfo?.externalAdReply?.title
+            ? `externalAdReplyBody|${msg.contextInfo.externalAdReply.title}`
+            : undefined,
     // --- FIX FACEBOOK ADS END ---
   };
 
@@ -65,7 +69,9 @@ const getTypeMessage = (msg: any) => {
 };
 
 const getMessageContent = (types: any) => {
-  const typeKey = Object.keys(types).find((key) => key !== 'externalAdReplyBody' && key !== 'messageType' && types[key] !== undefined);
+  const typeKey = Object.keys(types).find(
+    (key) => key !== 'externalAdReplyBody' && key !== 'messageType' && types[key] !== undefined,
+  );
 
   let result = typeKey ? types[typeKey] : undefined;
 
