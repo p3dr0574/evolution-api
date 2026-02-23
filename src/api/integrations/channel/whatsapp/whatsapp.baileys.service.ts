@@ -258,6 +258,11 @@ export class BaileysStartupService extends ChannelStartupService {
   private logBaileys = this.configService.get<Log>('LOG').BAILEYS;
   private eventProcessingQueue: Promise<void> = Promise.resolve();
 
+  // Cumulative history sync counters (reset on sync completion)
+  private historySyncMessageCount = 0;
+  private historySyncChatCount = 0;
+  private historySyncContactCount = 0;
+
   // Cache TTL constants (in seconds)
   private readonly MESSAGE_CACHE_TTL_SECONDS = 5 * 60; // 5 minutes - avoid duplicate message processing
   private readonly UPDATE_CACHE_TTL_SECONDS = 30 * 60; // 30 minutes - avoid duplicate status updates
@@ -1044,6 +1049,8 @@ export class BaileysStartupService extends ChannelStartupService {
           await this.prismaRepository.chat.createMany({ data: chatsRaw, skipDuplicates: true });
         }
 
+        this.historySyncChatCount += chatsRaw.length;
+
         this.sendDataWebhook(Events.CHATS_SET, chatsRaw);
 
         const messagesRaw: any[] = [];
@@ -1097,6 +1104,8 @@ export class BaileysStartupService extends ChannelStartupService {
           messagesRaw.push(this.prepareMessage(m));
         }
 
+        this.historySyncMessageCount += messagesRaw.length;
+
         if (this.configService.get<Database>('DATABASE').SAVE_DATA.HISTORIC) {
           await this.prismaRepository.message.createMany({ data: messagesRaw, skipDuplicates: true });
         }
@@ -1118,16 +1127,23 @@ export class BaileysStartupService extends ChannelStartupService {
           );
         }
 
+        const filteredContacts = contacts.filter((c) => !!c.notify || !!c.name);
+        this.historySyncContactCount += filteredContacts.length;
+
         await this.contactHandle['contacts.upsert'](
-          contacts.filter((c) => !!c.notify || !!c.name).map((c) => ({ id: c.id, name: c.name ?? c.notify })),
+          filteredContacts.map((c) => ({ id: c.id, name: c.name ?? c.notify })),
         );
 
         if (progress === 100) {
           this.sendDataWebhook(Events.MESSAGING_HISTORY_SET, {
-            messageCount: messagesRaw.length,
-            chatCount: chatsRaw.length,
-            contactCount: contacts?.length ?? 0,
+            messageCount: this.historySyncMessageCount,
+            chatCount: this.historySyncChatCount,
+            contactCount: this.historySyncContactCount,
           });
+
+          this.historySyncMessageCount = 0;
+          this.historySyncChatCount = 0;
+          this.historySyncContactCount = 0;
         }
 
         contacts = undefined;
