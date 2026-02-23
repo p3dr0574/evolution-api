@@ -1040,11 +1040,11 @@ export class BaileysStartupService extends ChannelStartupService {
           chatsRaw.push({ remoteJid: chat.id, instanceId: this.instanceId, name: chat.name });
         }
 
-        this.sendDataWebhook(Events.CHATS_SET, chatsRaw);
-
         if (this.configService.get<Database>('DATABASE').SAVE_DATA.HISTORIC) {
           await this.prismaRepository.chat.createMany({ data: chatsRaw, skipDuplicates: true });
         }
+
+        this.sendDataWebhook(Events.CHATS_SET, chatsRaw);
 
         const messagesRaw: any[] = [];
 
@@ -1097,14 +1097,14 @@ export class BaileysStartupService extends ChannelStartupService {
           messagesRaw.push(this.prepareMessage(m));
         }
 
+        if (this.configService.get<Database>('DATABASE').SAVE_DATA.HISTORIC) {
+          await this.prismaRepository.message.createMany({ data: messagesRaw, skipDuplicates: true });
+        }
+
         this.sendDataWebhook(Events.MESSAGES_SET, [...messagesRaw], true, undefined, {
           isLatest,
           progress,
         });
-
-        if (this.configService.get<Database>('DATABASE').SAVE_DATA.HISTORIC) {
-          await this.prismaRepository.message.createMany({ data: messagesRaw, skipDuplicates: true });
-        }
 
         if (
           this.configService.get<Chatwoot>('CHATWOOT').ENABLED &&
@@ -1121,6 +1121,14 @@ export class BaileysStartupService extends ChannelStartupService {
         await this.contactHandle['contacts.upsert'](
           contacts.filter((c) => !!c.notify || !!c.name).map((c) => ({ id: c.id, name: c.name ?? c.notify })),
         );
+
+        if (progress === 100) {
+          this.sendDataWebhook(Events.MESSAGING_HISTORY_SET, {
+            messageCount: messagesRaw.length,
+            chatCount: chatsRaw.length,
+            contactCount: contacts?.length ?? 0,
+          });
+        }
 
         contacts = undefined;
         messages = undefined;
