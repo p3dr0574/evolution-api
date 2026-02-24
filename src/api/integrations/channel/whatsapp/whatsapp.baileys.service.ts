@@ -258,10 +258,11 @@ export class BaileysStartupService extends ChannelStartupService {
   private logBaileys = this.configService.get<Log>('LOG').BAILEYS;
   private eventProcessingQueue: Promise<void> = Promise.resolve();
 
-  // Cumulative history sync counters (reset on sync completion)
+  // Cumulative history sync counters (reset on new sync or completion)
   private historySyncMessageCount = 0;
   private historySyncChatCount = 0;
   private historySyncContactCount = 0;
+  private historySyncLastProgress = -1;
 
   // Cache TTL constants (in seconds)
   private readonly MESSAGE_CACHE_TTL_SECONDS = 5 * 60; // 5 minutes - avoid duplicate message processing
@@ -996,6 +997,14 @@ export class BaileysStartupService extends ChannelStartupService {
       syncType?: proto.HistorySync.HistorySyncType;
     }) => {
       try {
+        // Reset counters when a new sync starts (progress resets or decreases)
+        if (progress <= this.historySyncLastProgress) {
+          this.historySyncMessageCount = 0;
+          this.historySyncChatCount = 0;
+          this.historySyncContactCount = 0;
+        }
+        this.historySyncLastProgress = progress ?? -1;
+
         if (syncType === proto.HistorySync.HistorySyncType.ON_DEMAND) {
           console.log('received on-demand history sync, messages=', messages);
         }
@@ -1144,6 +1153,7 @@ export class BaileysStartupService extends ChannelStartupService {
           this.historySyncMessageCount = 0;
           this.historySyncChatCount = 0;
           this.historySyncContactCount = 0;
+          this.historySyncLastProgress = -1;
         }
 
         contacts = undefined;
