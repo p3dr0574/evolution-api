@@ -126,7 +126,8 @@ export class SqsController extends EventController implements EventControllerInt
             ? 'singlequeue'
             : `${event.replace('.', '_').toLowerCase()}`;
         const queueName = `${prefixName}_${eventFormatted}.fifo`;
-        const baseUrl = sqsConfig.BASE_URL || `https://sqs.${sqsConfig.REGION}.amazonaws.com`;
+        const rawBaseUrl = sqsConfig.BASE_URL || `https://sqs.${sqsConfig.REGION}.amazonaws.com`;
+        const baseUrl = rawBaseUrl.replace(/\/+$/, '');
         const sqsUrl = `${baseUrl}/${sqsConfig.ACCOUNT_ID}/${queueName}`;
 
         const message = {
