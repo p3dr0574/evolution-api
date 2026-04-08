@@ -262,6 +262,7 @@ export class BaileysStartupService extends ChannelStartupService {
   // name/avatar changes to the real phone contact even when only the @lid is known.
   private readonly lidToPhoneCache = new NodeCache({ stdTTL: 60 * 60, useClones: false, maxKeys: 50000 });
   private endSession = false;
+  private isDeleting = false; // Flag to prevent reconnection during deletion
   private logBaileys = this.configService.get<Log>('LOG').BAILEYS;
   private eventProcessingQueue: Promise<void> = Promise.resolve();
 
@@ -284,10 +285,36 @@ export class BaileysStartupService extends ChannelStartupService {
   }
 
   public async logoutInstance() {
-    this.messageProcessor.onDestroy();
-    await this.client?.logout('Log out instance: ' + this.instanceName);
+    // Mark instance as deleting to prevent reconnection attempts.
+    this.isDeleting = true;
+    this.endSession = true;
 
-    this.client?.ws?.close();
+    this.messageProcessor.onDestroy();
+
+    if (this.client) {
+      try {
+        await this.client.logout('Log out instance: ' + this.instanceName);
+      } catch (error) {
+        // Downgraded to warn: logout failures here are recoverable — the
+        // credential cleanup below still runs and the DB row is forced to 'close'.
+        this.logger.warn(
+          `logoutInstance: client.logout() failed (${(error as Error)?.message}), proceeding with credential cleanup`,
+        );
+      }
+
+      // Improved socket cleanup.
+      try {
+        this.client.ws?.close();
+        this.client.end(new Error('Instance logout'));
+      } catch {
+        // ignore — ws may already be closed
+      }
+    }
+
+    // Force the in-memory connection state to 'close' so any concurrent reader
+    // observes the post-logout state immediately, even if the DB update below
+    // is delayed.
+    this.stateConnection = { state: 'close', statusReason: 401 };
 
     const db = this.configService.get<Database>('DATABASE');
     const cache = this.configService.get<CacheConf>('CACHE');
@@ -315,6 +342,11 @@ export class BaileysStartupService extends ChannelStartupService {
     if (sessionExists) {
       await this.prismaRepository.session.delete({ where: { sessionId: this.instanceId } });
     }
+
+    await this.prismaRepository.instance.update({
+      where: { id: this.instanceId },
+      data: { connectionStatus: 'close' },
+    });
   }
 
   public async getProfileName() {
@@ -448,8 +480,26 @@ export class BaileysStartupService extends ChannelStartupService {
     }
 
     if (connection === 'close') {
+      // Instance is being deleted or the session is ending on purpose — skip reconnection.
+      if (this.isDeleting || this.endSession) {
+        this.logger.info('Instance is being deleted/ended, skipping reconnection attempt');
+        return;
+      }
+
       const statusCode = (lastDisconnect?.error as Boom)?.output?.statusCode;
-      const codesToNotReconnect = [DisconnectReason.loggedOut, DisconnectReason.forbidden, 402, 406];
+      // 408 = request timeout — added per #2501 to avoid reconnect loops on
+      // transient network drops where the server returned a 408 in the close.
+      const codesToNotReconnect = [DisconnectReason.loggedOut, DisconnectReason.forbidden, 402, 406, 408];
+
+      // FIX: Do not reconnect if it's the initial connection (waiting for QR code)
+      // This prevents infinite loop that blocks QR code generation
+      const isInitialConnection = !this.instance.wuid && (this.instance.qrcode?.count ?? 0) === 0;
+
+      if (isInitialConnection) {
+        this.logger.info('Initial connection closed, waiting for QR code generation...');
+        return;
+      }
+
       const shouldReconnect = !codesToNotReconnect.includes(statusCode);
       if (shouldReconnect) {
         await this.reportProxyFailure(lastDisconnect?.error);
@@ -490,6 +540,10 @@ export class BaileysStartupService extends ChannelStartupService {
     }
 
     if (connection === 'open') {
+      if (!this.client?.user?.id) {
+        this.logger.warn('connectionUpdate: connection open but client.user is undefined, skipping');
+        return;
+      }
       await this.markProxyHealthy().catch((error) => this.logger.error(error));
       this.instance.wuid = this.client.user.id.replace(/:\d+/, '');
       try {
