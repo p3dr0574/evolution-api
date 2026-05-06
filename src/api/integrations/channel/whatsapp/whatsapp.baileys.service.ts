@@ -993,13 +993,15 @@ export class BaileysStartupService extends ChannelStartupService {
       syncType?: proto.HistorySync.HistorySyncType;
     }) => {
       try {
-        // Reset counters when a new sync starts (progress resets or decreases)
-        if (progress <= this.historySyncLastProgress) {
+        const normalizedProgress = progress ?? -1;
+
+        if (normalizedProgress <= this.historySyncLastProgress) {
           this.historySyncMessageCount = 0;
           this.historySyncChatCount = 0;
           this.historySyncContactCount = 0;
         }
-        this.historySyncLastProgress = progress ?? -1;
+
+        this.historySyncLastProgress = normalizedProgress;
 
         if (syncType === proto.HistorySync.HistorySyncType.ON_DEMAND) {
           console.log('received on-demand history sync, messages=', messages);
@@ -1135,15 +1137,12 @@ export class BaileysStartupService extends ChannelStartupService {
         const filteredContacts = contacts.filter((c) => !!c.notify || !!c.name);
         this.historySyncContactCount += filteredContacts.length;
 
-        await this.contactHandle['contacts.upsert'](
-          filteredContacts.map((c) => ({ id: c.id, name: c.name ?? c.notify })),
-        );
-
-        if (progress === 100) {
+        if (normalizedProgress === 100) {
           this.sendDataWebhook(Events.MESSAGING_HISTORY_SET, {
             messageCount: this.historySyncMessageCount,
             chatCount: this.historySyncChatCount,
             contactCount: this.historySyncContactCount,
+            progress: normalizedProgress,
           });
 
           this.historySyncMessageCount = 0;
@@ -1151,6 +1150,10 @@ export class BaileysStartupService extends ChannelStartupService {
           this.historySyncContactCount = 0;
           this.historySyncLastProgress = -1;
         }
+
+        await this.contactHandle['contacts.upsert'](
+          filteredContacts.map((c) => ({ id: c.id, name: c.name ?? c.notify })),
+        );
 
         contacts = undefined;
         messages = undefined;
