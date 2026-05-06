@@ -7,6 +7,7 @@ import {
   getBase64FromMediaMessageDto,
   LastMessage,
   MarkChatUnreadDto,
+  MarkMessageAsPlayedDto,
   NumberBusiness,
   OnWhatsAppDto,
   PrivacySettingDto,
@@ -3854,6 +3855,24 @@ public async buttonMessage(data: SendButtonsDto) {
       return { message: 'Read messages', read: 'success' };
     } catch (error) {
       throw new InternalServerErrorException('Read messages fail', error.toString());
+    }
+  }
+
+  public async markMessageAsPlayed(data: MarkMessageAsPlayedDto) {
+    try {
+      const keys: proto.IMessageKey[] = [];
+      data.playedMessages.forEach((played) => {
+        if (isJidGroup(played.remoteJid) || isPnUser(played.remoteJid)) {
+          keys.push({ remoteJid: played.remoteJid, fromMe: played.fromMe, id: played.id });
+        }
+      });
+      // Baileys exposes sendReceipts(keys, type) where type='played' triggers the
+      // PLAYED ack (blue microphone). Used when an agent plays back an audio
+      // message received from a contact, mirroring the contact's view in WhatsApp.
+      await this.client.sendReceipts(keys, 'played');
+      return { message: 'Played messages', played: 'success' };
+    } catch (error) {
+      throw new InternalServerErrorException('Mark messages as played fail', error.toString());
     }
   }
 
