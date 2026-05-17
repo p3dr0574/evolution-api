@@ -380,7 +380,11 @@ export class WAMonitoringService {
       ownerJid: instanceData.ownerJid,
     });
 
-    if (instanceData.connectionStatus === 'open' || instanceData.connectionStatus === 'connecting') {
+    if (
+      instanceData.connectionStatus === 'open' ||
+      instanceData.connectionStatus === 'connecting' ||
+      instanceData.integration === Integration.EVOLUTION
+    ) {
       this.logger.info(
         `Auto-connecting instance "${instanceData.instanceName}" (status: ${instanceData.connectionStatus})`,
       );
