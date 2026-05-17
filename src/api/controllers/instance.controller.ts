@@ -40,6 +40,8 @@ export class InstanceController {
     }
 
     try {
+      instanceData.instanceName = instanceData.instanceName?.trim();
+
       const instance = channelController.init(instanceData, {
         configService: this.configService,
         eventEmitter: this.eventEmitter,
