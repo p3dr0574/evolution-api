@@ -1,5 +1,5 @@
 import { InstanceDto } from '@api/dto/instance.dto';
-import { prismaRepository } from '@api/server.module';
+import { prismaRepository, waMonitor } from '@api/server.module';
 import { Auth, configService, Database } from '@config/env.config';
 import { Logger } from '@config/logger.config';
 import { ForbiddenException, UnauthorizedException } from '@exceptions';
@@ -9,7 +9,8 @@ const logger = new Logger('GUARD');
 
 async function apikey(req: Request, _: Response, next: NextFunction) {
   const env = configService.get<Auth>('AUTHENTICATION').API_KEY;
-  const key = req.get('apikey');
+  // Accept apikey from header (standard) or query param (used for direct browser downloads like /postman).
+  const key = req.get('apikey') || (req.query.apikey as string | undefined);
   const db = configService.get<Database>('DATABASE');
 
   if (!key) {
@@ -27,10 +28,16 @@ async function apikey(req: Request, _: Response, next: NextFunction) {
 
   try {
     if (param?.instanceName) {
+      const knownToken = req.evolutionInstance?.token ?? waMonitor.waInstances[param.instanceName]?.token;
+      if (knownToken === key) {
+        return next();
+      }
+
       const instance = await prismaRepository.instance.findUnique({
         where: { name: param.instanceName },
+        select: { token: true },
       });
-      if (instance.token === key) {
+      if (instance?.token === key) {
         return next();
       }
     } else {
