@@ -9,8 +9,7 @@ const logger = new Logger('GUARD');
 
 async function apikey(req: Request, _: Response, next: NextFunction) {
   const env = configService.get<Auth>('AUTHENTICATION').API_KEY;
-  // Accept apikey from header (standard) or query param (used for direct browser downloads like /postman).
-  const key = req.get('apikey') || (req.query.apikey as string | undefined);
+  const key = req.get('apikey');
   const db = configService.get<Database>('DATABASE');
 
   if (!key) {

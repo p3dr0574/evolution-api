@@ -5,8 +5,9 @@ import { ChannelRouter } from '@api/integrations/channel/channel.router';
 import { ChatbotRouter } from '@api/integrations/chatbot/chatbot.router';
 import { EventRouter } from '@api/integrations/event/event.router';
 import { StorageRouter } from '@api/integrations/storage/storage.router';
-import { waMonitor } from '@api/server.module';
-import { configService, Database, Facebook } from '@config/env.config';
+import { dataPruneService, waMonitor } from '@api/server.module';
+import { Auth, configService, Database, Facebook, ServerShutdown } from '@config/env.config';
+import { Logger } from '@config/logger.config';
 import { fetchLatestWaWebVersion } from '@utils/fetchLatestWaWebVersion';
 import { NextFunction, Request, Response, Router } from 'express';
 import fs from 'fs';
@@ -28,6 +29,7 @@ import { ViewsRouter } from './view.router';
 enum HttpStatus {
   OK = 200,
   CREATED = 201,
+  ACCEPTED = 202,
   NOT_FOUND = 404,
   FORBIDDEN = 403,
   BAD_REQUEST = 400,
@@ -43,6 +45,7 @@ const guards = [instanceExistsGuard, instanceLoggedGuard, authGuard['apikey']];
 const telemetry = new Telemetry();
 
 const packageJson = JSON.parse(fs.readFileSync('./package.json', 'utf8'));
+const postmanCollectionPath = path.join(process.cwd(), 'postman', 'Evolution API v2.postman_collection.json');
 
 // Middleware for metrics IP whitelist
 const metricsIPWhitelist = (req: Request, res: Response, next: NextFunction) => {
@@ -55,7 +58,7 @@ const metricsIPWhitelist = (req: Request, res: Response, next: NextFunction) => 
     req.headers['x-forwarded-for'],
   ].filter((ip) => ip !== undefined);
 
-  if (allowedIPs.filter((ip) => clientIPs.includes(ip)) === 0) {
+  if (allowedIPs.filter((ip) => clientIPs.includes(ip)).length === 0) {
     return res.status(403).send('Forbidden: IP not allowed');
   }
 
@@ -160,7 +163,40 @@ if (metricsConfig.ENABLED) {
   });
 }
 
+const logger = new Logger('SERVER');
+
+const globalApiKeyGuard = (req: Request, res: Response, next: NextFunction) => {
+  const key = req.get('apikey');
+  const globalApiKey = configService.get<Auth>('AUTHENTICATION').API_KEY.KEY;
+
+  if (!key || key !== globalApiKey) {
+    return res.status(HttpStatus.UNAUTHORIZED).json({
+      status: HttpStatus.UNAUTHORIZED,
+      error: 'Unauthorized',
+      response: {
+        message: ['Invalid global api key'],
+      },
+    });
+  }
+
+  return next();
+};
+
 if (!serverConfig.DISABLE_MANAGER) router.use('/manager', new ViewsRouter().router);
+
+router.get('/postman', (req, res) => {
+  if (!fs.existsSync(postmanCollectionPath)) {
+    return res.status(HttpStatus.NOT_FOUND).json({
+      status: HttpStatus.NOT_FOUND,
+      error: 'Not Found',
+      response: {
+        message: ['Postman collection not found'],
+      },
+    });
+  }
+
+  return res.download(postmanCollectionPath, `Evolution API v${packageJson.version}.postman_collection.json`);
+});
 
 router.get('/assets/*', (req, res) => {
   const fileName = req.params[0];
@@ -212,6 +248,48 @@ router
       facebookAppId: facebookConfig.APP_ID,
       facebookConfigId: facebookConfig.CONFIG_ID,
       facebookUserToken: facebookConfig.USER_TOKEN,
+    });
+  })
+  .post('/server/shutdown', globalApiKeyGuard, async (req, res) => {
+    const shutdownConfig = configService.get<ServerShutdown>('SERVER_SHUTDOWN');
+
+    if (!shutdownConfig.ENABLED) {
+      return res.status(HttpStatus.FORBIDDEN).json({
+        status: HttpStatus.FORBIDDEN,
+        error: 'Forbidden',
+        response: {
+          message: ['Server shutdown endpoint is disabled'],
+        },
+      });
+    }
+
+    const exitCode = shutdownConfig.EXIT_CODE;
+    const delayMs = shutdownConfig.DELAY_MS;
+
+    res.on('finish', () => {
+      const timer = setTimeout(() => {
+        logger.warn(`Server shutdown requested by endpoint. Exiting with code ${exitCode}.`);
+        process.exit(exitCode);
+      }, delayMs);
+
+      timer.unref();
+    });
+
+    return res.status(HttpStatus.ACCEPTED).json({
+      status: HttpStatus.ACCEPTED,
+      message: 'Server shutdown scheduled',
+      response: {
+        exitCode,
+        delayMs,
+      },
+    });
+  })
+  .post('/server/prune', globalApiKeyGuard, async (req, res) => {
+    const response = await dataPruneService.run();
+    return res.status(HttpStatus.OK).json({
+      status: HttpStatus.OK,
+      message: 'Data prune completed',
+      response,
     });
   })
   .use('/instance', new InstanceRouter(configService, ...guards).router)
