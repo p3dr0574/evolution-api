@@ -227,3 +227,30 @@ export const presenceOnlySchema: JSONSchema7 = {
   },
   required: ['presence'],
 };
+
+export const renameInstanceSchema: JSONSchema7 = {
+  $id: v4(),
+  type: 'object',
+  properties: {
+    newName: {
+      type: 'string',
+      minLength: 1,
+      maxLength: 255,
+      pattern: '^[A-Za-z0-9._-]+$',
+    },
+  },
+  required: ['newName'],
+};
+
+export const changeApikeyInstanceSchema: JSONSchema7 = {
+  $id: v4(),
+  type: 'object',
+  properties: {
+    newApikey: {
+      type: 'string',
+      minLength: 8,
+      maxLength: 256,
+    },
+  },
+  required: ['newApikey'],
+};

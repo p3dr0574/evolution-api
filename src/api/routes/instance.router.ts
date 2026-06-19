@@ -1,8 +1,8 @@
 import { RouterBroker } from '@api/abstract/abstract.router';
-import { InstanceDto, SetPresenceDto } from '@api/dto/instance.dto';
+import { ChangeApikeyDto, InstanceDto, RenameInstanceDto, SetPresenceDto } from '@api/dto/instance.dto';
 import { instanceController } from '@api/server.module';
 import { ConfigService } from '@config/env.config';
-import { instanceSchema, presenceOnlySchema } from '@validate/validate.schema';
+import { changeApikeyInstanceSchema, instanceSchema, presenceOnlySchema, renameInstanceSchema } from '@validate/validate.schema';
 import { RequestHandler, Router } from 'express';
 
 import { HttpStatus } from './index.router';
@@ -30,6 +30,26 @@ export class InstanceRouter extends RouterBroker {
           schema: null,
           ClassRef: InstanceDto,
           execute: (instance) => instanceController.restartInstance(instance),
+        });
+
+        return res.status(HttpStatus.OK).json(response);
+      })
+      .put(this.routerPath('rename'), ...guards, async (req, res) => {
+        const response = await this.dataValidate<RenameInstanceDto>({
+          request: req,
+          schema: renameInstanceSchema,
+          ClassRef: RenameInstanceDto,
+          execute: (instance, data) => instanceController.renameInstance(instance, data),
+        });
+
+        return res.status(HttpStatus.OK).json(response);
+      })
+      .put(this.routerPath('changeApikey'), ...guards, async (req, res) => {
+        const response = await this.dataValidate<ChangeApikeyDto>({
+          request: req,
+          schema: changeApikeyInstanceSchema,
+          ClassRef: ChangeApikeyDto,
+          execute: (instance, data) => instanceController.changeApikey(instance, data),
         });
 
         return res.status(HttpStatus.OK).json(response);

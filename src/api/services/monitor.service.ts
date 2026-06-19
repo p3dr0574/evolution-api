@@ -6,7 +6,7 @@ import { Events, Integration } from '@api/types/wa.types';
 import { CacheConf, Chatwoot, ConfigService, Database, DelInstance, ProviderSession } from '@config/env.config';
 import { Logger } from '@config/logger.config';
 import { INSTANCE_DIR, STORE_DIR } from '@config/path.config';
-import { NotFoundException } from '@exceptions';
+import { BadRequestException, NotFoundException } from '@exceptions';
 import { execFileSync } from 'child_process';
 import EventEmitter2 from 'eventemitter2';
 import { rmSync } from 'fs';
@@ -41,6 +41,18 @@ export class WAMonitoringService {
   private readonly delInstanceTimeouts: Record<string, NodeJS.Timeout> = {};
 
   private readonly providerSession: ProviderSession;
+
+  private async runWithConcurrency<T>(items: T[], worker: (item: T) => Promise<void>, concurrency = 5): Promise<void> {
+    let nextIndex = 0;
+    const workers = Array.from({ length: Math.min(concurrency, items.length) }, async () => {
+      while (nextIndex < items.length) {
+        const currentIndex = nextIndex++;
+        await worker(items[currentIndex]);
+      }
+    });
+
+    await Promise.all(workers);
+  }
 
   public delInstanceTime(instance: string) {
     const time = this.configService.get<DelInstance>('DEL_INSTANCE');
@@ -270,6 +282,81 @@ export class WAMonitoringService {
     }
   }
 
+  public async changeInstanceToken(instanceName: string, newToken: string) {
+    const instance = await this.prismaRepository.instance.findUnique({ where: { name: instanceName } });
+    if (!instance) {
+      throw new NotFoundException(`Instance "${instanceName}" not found`);
+    }
+
+    if (instance.token === newToken) {
+      return instance;
+    }
+
+    const tokenInUse = await this.prismaRepository.instance.findFirst({
+      where: { token: newToken, NOT: { id: instance.id } },
+      select: { id: true },
+    });
+    if (tokenInUse) {
+      throw new BadRequestException(`This API key is already in use by another instance`);
+    }
+
+    const updated = await this.prismaRepository.instance.update({
+      where: { id: instance.id },
+      data: { token: newToken },
+    });
+
+    const runtime = this.waInstances[instanceName];
+    if (runtime) {
+      runtime.token = newToken;
+    }
+
+    this.logger.info(`API key changed for instance "${instanceName}"`);
+    return updated;
+  }
+
+  public async renameInstance(currentName: string, newName: string) {
+    const normalizedName = newName.trim();
+    if (currentName === normalizedName) {
+      return this.prismaRepository.instance.findUnique({ where: { name: currentName } });
+    }
+
+    const [instance, nameInUse] = await Promise.all([
+      this.prismaRepository.instance.findUnique({ where: { name: currentName } }),
+      this.prismaRepository.instance.findUnique({ where: { name: normalizedName }, select: { id: true } }),
+    ]);
+
+    if (!instance) {
+      throw new NotFoundException(`Instance "${currentName}" not found`);
+    }
+    if (nameInUse || this.waInstances[normalizedName]) {
+      throw new BadRequestException(`This name "${normalizedName}" is already in use`);
+    }
+
+    const [updatedInstance] = await this.prismaRepository.$transaction([
+      this.prismaRepository.instance.update({
+        where: { id: instance.id },
+        data: { name: normalizedName },
+      }),
+      this.prismaRepository.webhookDelivery.updateMany({
+        where: { instanceName: currentName },
+        data: { instanceName: normalizedName },
+      }),
+    ]);
+
+    const runtime = this.waInstances[currentName];
+    if (runtime) {
+      runtime.instanceName = normalizedName;
+      this.waInstances[normalizedName] = runtime;
+      delete this.waInstances[currentName];
+    }
+
+    this.clearDelInstanceTime(currentName);
+    await this.cache.delete(currentName);
+    this.logger.info(`Instance renamed from "${currentName}" to "${normalizedName}"`);
+
+    return updatedInstance;
+  }
+
   private async setInstance(instanceData: InstanceDto) {
     const instance = channelController.init(instanceData, {
       configService: this.configService,
@@ -311,29 +398,27 @@ export class WAMonitoringService {
     const keys = await this.cache.keys();
 
     if (keys?.length > 0) {
-      await Promise.all(
-        keys.map(async (k) => {
-          const instanceData = await this.prismaRepository.instance.findUnique({
-            where: { id: k.split(':')[1] },
-          });
+      await this.runWithConcurrency(keys, async (k) => {
+        const instanceData = await this.prismaRepository.instance.findUnique({
+          where: { id: k.split(':')[1] },
+        });
 
-          if (!instanceData) {
-            return;
-          }
+        if (!instanceData) {
+          return;
+        }
 
-          const instance = {
-            instanceId: k.split(':')[1],
-            instanceName: k.split(':')[2],
-            integration: instanceData.integration,
-            token: instanceData.token,
-            number: instanceData.number,
-            businessId: instanceData.businessId,
-            connectionStatus: instanceData.connectionStatus as any, // Pass connection status
-          };
+        const instance = {
+          instanceId: k.split(':')[1],
+          instanceName: k.split(':')[2],
+          integration: instanceData.integration,
+          token: instanceData.token,
+          number: instanceData.number,
+          businessId: instanceData.businessId,
+          connectionStatus: instanceData.connectionStatus as any, // Pass connection status
+        };
 
-          this.setInstance(instance);
-        }),
-      );
+        await this.setInstance(instance);
+      });
     }
   }
 
@@ -348,20 +433,18 @@ export class WAMonitoringService {
       return;
     }
 
-    await Promise.all(
-      instances.map(async (instance) => {
-        this.setInstance({
-          instanceId: instance.id,
-          instanceName: instance.name,
-          integration: instance.integration,
-          token: instance.token,
-          number: instance.number,
-          businessId: instance.businessId,
-          ownerJid: instance.ownerJid,
-          connectionStatus: instance.connectionStatus as any, // Pass connection status
-        });
-      }),
-    );
+    await this.runWithConcurrency(instances, async (instance) => {
+      await this.setInstance({
+        instanceId: instance.id,
+        instanceName: instance.name,
+        integration: instance.integration,
+        token: instance.token,
+        number: instance.number,
+        businessId: instance.businessId,
+        ownerJid: instance.ownerJid,
+        connectionStatus: instance.connectionStatus as any, // Pass connection status
+      });
+    });
   }
 
   private async loadInstancesFromProvider() {
@@ -371,22 +454,24 @@ export class WAMonitoringService {
       return;
     }
 
-    await Promise.all(
-      instances?.data?.map(async (instanceId: string) => {
-        const instance = await this.prismaRepository.instance.findUnique({
-          where: { id: instanceId },
-        });
+    await this.runWithConcurrency(instances.data, async (instanceId: string) => {
+      const instance = await this.prismaRepository.instance.findUnique({
+        where: { id: instanceId },
+      });
 
-        this.setInstance({
-          instanceId: instance.id,
-          instanceName: instance.name,
-          integration: instance.integration,
-          token: instance.token,
-          businessId: instance.businessId,
-          connectionStatus: instance.connectionStatus as any, // Pass connection status
-        });
-      }),
-    );
+      if (!instance) {
+        return;
+      }
+
+      await this.setInstance({
+        instanceId: instance.id,
+        instanceName: instance.name,
+        integration: instance.integration,
+        token: instance.token,
+        businessId: instance.businessId,
+        connectionStatus: instance.connectionStatus as any, // Pass connection status
+      });
+    });
   }
 
   private removeInstance() {

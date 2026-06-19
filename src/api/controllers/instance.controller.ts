@@ -1,4 +1,4 @@
-import { InstanceDto, SetPresenceDto } from '@api/dto/instance.dto';
+import { ChangeApikeyDto, InstanceDto, RenameInstanceDto, SetPresenceDto } from '@api/dto/instance.dto';
 import { ChatwootService } from '@api/integrations/chatbot/chatwoot/services/chatwoot.service';
 import { ProviderFiles } from '@api/provider/sessions';
 import { PrismaRepository } from '@api/repository/repository.service';
@@ -395,6 +395,31 @@ export class InstanceController {
       instance: {
         instanceName: instanceName,
         state: this.waMonitor.waInstances[instanceName]?.connectionStatus?.state,
+      },
+    };
+  }
+
+  public async renameInstance({ instanceName }: InstanceDto, data: RenameInstanceDto) {
+    const instance = await this.waMonitor.renameInstance(instanceName, data.newName);
+
+    return {
+      instance: {
+        instanceId: instance.id,
+        oldName: instanceName,
+        instanceName: instance.name,
+      },
+      warning: 'External integrations that contain the old instance name in their callback URL must be updated.',
+    };
+  }
+
+  public async changeApikey({ instanceName }: InstanceDto, data: ChangeApikeyDto) {
+    const instance = await this.waMonitor.changeInstanceToken(instanceName, data.newApikey);
+
+    return {
+      instance: {
+        instanceId: instance.id,
+        instanceName: instance.name,
+        apikey: instance.token,
       },
     };
   }
