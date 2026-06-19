@@ -248,6 +248,12 @@ export class BaileysStartupService extends ChannelStartupService {
   private authStateProvider: AuthStateProvider;
   private readonly msgRetryCounterCache: CacheStore = new NodeCache();
   private readonly userDevicesCache: CacheStore = new NodeCache({ stdTTL: 300000, useClones: false });
+  private readonly profilePictureCache = new NodeCache({ stdTTL: 15 * 60, useClones: false, maxKeys: 10000 });
+  private readonly contactExistsCache = new NodeCache({ stdTTL: 5 * 60, useClones: false, maxKeys: 100000 });
+  private readonly onWhatsappSyncCache = new NodeCache({ stdTTL: 15 * 60, useClones: false, maxKeys: 100000 });
+  // Maps @lid JID → resolved @s.whatsapp.net JID so contacts.upsert/update can propagate
+  // name/avatar changes to the real phone contact even when only the @lid is known.
+  private readonly lidToPhoneCache = new NodeCache({ stdTTL: 60 * 60, useClones: false, maxKeys: 50000 });
   private endSession = false;
   private logBaileys = this.configService.get<Log>('LOG').BAILEYS;
   private eventProcessingQueue: Promise<void> = Promise.resolve();
@@ -433,6 +439,7 @@ export class BaileysStartupService extends ChannelStartupService {
       const codesToNotReconnect = [DisconnectReason.loggedOut, DisconnectReason.forbidden, 402, 406];
       const shouldReconnect = !codesToNotReconnect.includes(statusCode);
       if (shouldReconnect) {
+        await this.reportProxyFailure(lastDisconnect?.error);
         await this.connectToWhatsapp(this.phoneNumber);
       } else {
         this.sendDataWebhook(Events.STATUS_INSTANCE, {
@@ -470,6 +477,7 @@ export class BaileysStartupService extends ChannelStartupService {
     }
 
     if (connection === 'open') {
+      await this.markProxyHealthy().catch((error) => this.logger.error(error));
       this.instance.wuid = this.client.user.id.replace(/:\d+/, '');
       try {
         const profilePic = await this.profilePicture(this.instance.wuid);
@@ -611,13 +619,14 @@ export class BaileysStartupService extends ChannelStartupService {
 
       if (this.localProxy?.host?.includes('proxyscrape')) {
         try {
-          const response = await axios.get(this.localProxy?.host);
+          const response = await axios.get(this.localProxy?.host, { timeout: 10000 });
           const text = response.data;
           const proxyUrls = text.split('\r\n');
           const rand = Math.floor(Math.random() * Math.floor(proxyUrls.length));
           const proxyUrl = 'http://' + proxyUrls[rand];
           options = { agent: makeProxyAgent(proxyUrl), fetchAgent: makeProxyAgentUndici(proxyUrl) };
-        } catch {
+        } catch (error) {
+          this.logger.warn(`Failed to load proxy list, connecting without proxy: ${error instanceof Error ? error.message : error}`);
           this.localProxy.enabled = false;
         }
       } else {
@@ -727,10 +736,7 @@ export class BaileysStartupService extends ChannelStartupService {
 
   public async connectToWhatsapp(number?: string): Promise<WASocket> {
     try {
-      this.loadChatwoot();
-      this.loadSettings();
-      this.loadWebhook();
-      this.loadProxy();
+      await Promise.all([this.loadChatwoot(), this.loadSettings(), this.loadWebhook(), this.loadProxy()]);
 
       // Remontar o messageProcessor para garantir que está funcionando após reconexão
       this.messageProcessor.mount({
@@ -740,6 +746,14 @@ export class BaileysStartupService extends ChannelStartupService {
       return await this.createClient(number);
     } catch (error) {
       this.logger.error(error);
+      if (await this.reportProxyFailure(error)) {
+        try {
+          return await this.createClient(number);
+        } catch (retryError) {
+          this.logger.error(retryError);
+          throw new InternalServerErrorException(retryError?.toString());
+        }
+      }
       throw new InternalServerErrorException(error?.toString());
     }
   }
@@ -813,7 +827,25 @@ export class BaileysStartupService extends ChannelStartupService {
   private readonly contactHandle = {
     'contacts.upsert': async (contacts: Contact[]) => {
       try {
-        const contactsRaw: any = contacts.map((contact) => ({
+        // For @lid contacts with a known mapping, propagate name/avatar to the real contact.
+        // For @lid contacts without a mapping, skip — they'll be created by messages.upsert.
+        const lidContacts = contacts.filter((c) => c.id.endsWith('@lid'));
+        for (const lid of lidContacts) {
+          const realJid = this.lidToPhoneCache.get<string>(lid.id);
+          if (realJid && this.configService.get<Database>('DATABASE').SAVE_DATA.CONTACTS) {
+            const name = lid.name || lid.verifiedName;
+            if (name) {
+              await this.prismaRepository.contact.updateMany({
+                where: { remoteJid: realJid, instanceId: this.instanceId },
+                data: { pushName: name },
+              });
+            }
+          }
+        }
+
+        const resolvedContacts = contacts.filter((c) => !c.id.endsWith('@lid'));
+
+        const contactsRaw: any = resolvedContacts.map((contact) => ({
           remoteJid: contact.id,
           pushName: contact?.name || contact?.verifiedName || contact.id.split('@')[0],
           profilePicUrl: null,
@@ -849,7 +881,7 @@ export class BaileysStartupService extends ChannelStartupService {
         }
 
         const updatedContacts = await Promise.all(
-          contacts.map(async (contact) => ({
+          resolvedContacts.map(async (contact) => ({
             remoteJid: contact.id,
             pushName: contact?.name || contact?.verifiedName || contact.id.split('@')[0],
             profilePicUrl: (await this.profilePicture(contact.id)).profilePictureUrl,
@@ -902,6 +934,20 @@ export class BaileysStartupService extends ChannelStartupService {
     'contacts.update': async (contacts: Partial<Contact>[]) => {
       const contactsRaw: { remoteJid: string; pushName?: string; profilePicUrl?: string; instanceId: string }[] = [];
       for await (const contact of contacts) {
+        if (contact.id?.endsWith('@lid')) {
+          // For @lid contacts with a known phone mapping, propagate name/avatar to the real contact.
+          const realJid = this.lidToPhoneCache.get<string>(contact.id);
+          if (realJid && this.configService.get<Database>('DATABASE').SAVE_DATA.CONTACTS) {
+            const name = contact.name ?? contact.verifiedName;
+            if (name) {
+              await this.prismaRepository.contact.updateMany({
+                where: { remoteJid: realJid, instanceId: this.instanceId },
+                data: { pushName: name },
+              });
+            }
+          }
+          continue;
+        }
         this.logger.debug(`Updating contact: ${JSON.stringify(contact, null, 2)}`);
         contactsRaw.push({
           remoteJid: contact.id,
@@ -1328,6 +1374,26 @@ export class BaileysStartupService extends ChannelStartupService {
             await this.client.readMessages([received.key]);
           }
 
+          // Resolve @lid → real phone BEFORE Chatwoot and DB so all downstream processing
+          // (contact creation, conversation key, chat unread counter) uses the canonical JID.
+          const lidJidBeforeSwap = messageRaw.key.remoteJid?.includes('@lid')
+            ? messageRaw.key.remoteJid
+            : null;
+          if (lidJidBeforeSwap && messageRaw.key.remoteJidAlt) {
+            const lidNumber = lidJidBeforeSwap.split('@')[0];
+            const altNumber = messageRaw.key.remoteJidAlt.split('@')[0];
+            // Only swap when remoteJidAlt carries a DIFFERENT number (the real phone).
+            // Baileys sometimes sets remoteJidAlt = lidNumber@s.whatsapp.net as a fallback
+            // when the LID→phone mapping is not cached — swapping that would create a
+            // duplicate contact with the LID treated as a phone number.
+            if (altNumber !== lidNumber) {
+              messageRaw.key.remoteJid = messageRaw.key.remoteJidAlt;
+              // Cache the @lid → real phone mapping so contacts.upsert/update can
+              // propagate name/avatar changes to the right contact.
+              this.lidToPhoneCache.set(lidJidBeforeSwap, messageRaw.key.remoteJid);
+            }
+          }
+
           if (
             this.configService.get<Chatwoot>('CHATWOOT').ENABLED &&
             this.localChatwoot?.enabled &&
@@ -1362,6 +1428,8 @@ export class BaileysStartupService extends ChannelStartupService {
             const { pollUpdates, ...messageData } = messageRaw;
             const msg = await this.prismaRepository.message.create({ data: messageData });
 
+            // After the early LID swap (before line 1377), remoteJid is already the canonical
+            // phone JID — no separate canonicalChatJid computation needed.
             const { remoteJid } = received.key;
             const timestamp = msg.messageTimestamp;
             const fromMe = received.key.fromMe.toString();
@@ -1480,11 +1548,6 @@ export class BaileysStartupService extends ChannelStartupService {
           this.logger.verbose(messageRaw);
 
           sendTelemetry(`received.message.${messageRaw.messageType ?? 'unknown'}`);
-          if (messageRaw.key.remoteJid?.includes('@lid') && messageRaw.key.remoteJidAlt) {
-            messageRaw.key.remoteJid = messageRaw.key.remoteJidAlt;
-          }
-          console.log(messageRaw);
-
           this.sendDataWebhook(Events.MESSAGES_UPSERT, messageRaw);
 
           await chatbotController.emit({
@@ -1494,9 +1557,36 @@ export class BaileysStartupService extends ChannelStartupService {
             pushName: messageRaw.pushName,
           });
 
-          const contact = await this.prismaRepository.contact.findFirst({
-            where: { remoteJid: received.key.remoteJid, instanceId: this.instanceId },
-          });
+          if (received.key.remoteJid === 'status@broadcast') {
+            continue;
+          }
+
+          // messageRaw.key.remoteJid is already the canonical (post-swap) JID.
+          const contactJid = messageRaw.key.remoteJid;
+
+          // When LID was resolved to a real phone, heal any pre-existing @lid contact in Chatwoot
+          // (e.g. from a prior session before the swap fix). Fire-and-forget.
+          if (
+            lidJidBeforeSwap &&
+            contactJid !== lidJidBeforeSwap &&
+            this.configService.get<Chatwoot>('CHATWOOT').ENABLED &&
+            this.localChatwoot?.enabled
+          ) {
+            const instanceDto = { instanceName: this.instance.name, instanceId: this.instance.id };
+            this.chatwootService.healLidContact(instanceDto, lidJidBeforeSwap, contactJid);
+          }
+
+          let contactExists = this.contactExistsCache.get<boolean>(contactJid);
+          if (contactExists === undefined) {
+            const contact = await this.prismaRepository.contact.findUnique({
+              where: {
+                remoteJid_instanceId: { remoteJid: contactJid, instanceId: this.instanceId },
+              },
+              select: { id: true },
+            });
+            contactExists = !!contact;
+            this.contactExistsCache.set(contactJid, contactExists);
+          }
 
           const contactRaw: {
             remoteJid: string;
@@ -1504,28 +1594,28 @@ export class BaileysStartupService extends ChannelStartupService {
             profilePicUrl?: string;
             instanceId: string;
           } = {
-            remoteJid: received.key.remoteJid,
+            remoteJid: contactJid,
             pushName: received.key.fromMe ? '' : received.key.fromMe == null ? '' : received.pushName,
-            profilePicUrl: (await this.profilePicture(received.key.remoteJid)).profilePictureUrl,
+            profilePicUrl: (await this.profilePicture(contactJid)).profilePictureUrl,
             instanceId: this.instanceId,
           };
 
-          if (contactRaw.remoteJid === 'status@broadcast') {
-            continue;
-          }
-
           if (contactRaw.remoteJid.includes('@s.whatsapp') || contactRaw.remoteJid.includes('@lid')) {
-            await saveOnWhatsappCache([
-              {
-                remoteJid:
-                  messageRaw.key.addressingMode === 'lid' ? messageRaw.key.remoteJidAlt : messageRaw.key.remoteJid,
-                remoteJidAlt: messageRaw.key.remoteJidAlt,
-                lid: messageRaw.key.addressingMode === 'lid' ? 'lid' : null,
-              },
-            ]);
+            const onWhatsappData = {
+              remoteJid:
+                messageRaw.key.addressingMode === 'lid' ? messageRaw.key.remoteJidAlt : messageRaw.key.remoteJid,
+              remoteJidAlt: messageRaw.key.remoteJidAlt,
+              lid: messageRaw.key.addressingMode === 'lid' ? ('lid' as const) : null,
+            };
+            const syncKey = `${onWhatsappData.remoteJid}|${onWhatsappData.remoteJidAlt ?? ''}|${onWhatsappData.lid ?? ''}`;
+
+            if (!this.onWhatsappSyncCache.has(syncKey)) {
+              await saveOnWhatsappCache([onWhatsappData]);
+              this.onWhatsappSyncCache.set(syncKey, true);
+            }
           }
 
-          if (contact) {
+          if (contactExists) {
             this.sendDataWebhook(Events.CONTACTS_UPDATE, contactRaw);
 
             if (this.configService.get<Chatwoot>('CHATWOOT').ENABLED && this.localChatwoot?.enabled) {
@@ -1543,6 +1633,7 @@ export class BaileysStartupService extends ChannelStartupService {
                 update: contactRaw,
               });
 
+            this.contactExistsCache.set(contactRaw.remoteJid, true);
             continue;
           }
 
@@ -1554,6 +1645,7 @@ export class BaileysStartupService extends ChannelStartupService {
               update: contactRaw,
               create: contactRaw,
             });
+          this.contactExistsCache.set(contactRaw.remoteJid, true);
         }
       } catch (error) {
         this.logger.error(error);
@@ -1575,8 +1667,6 @@ export class BaileysStartupService extends ChannelStartupService {
         const cached = await this.baileysCache.get(updateKey);
 
         const secondsSinceEpoch = Math.floor(Date.now() / 1000);
-        console.log('CACHE:', { cached, updateKey, messageTimestamp: update.messageTimestamp, secondsSinceEpoch });
-
         if (
           (update.messageTimestamp && update.messageTimestamp === cached) ||
           (!update.messageTimestamp && secondsSinceEpoch === cached)
@@ -2049,13 +2139,22 @@ export class BaileysStartupService extends ChannelStartupService {
 
   public async profilePicture(number: string) {
     const jid = createJid(number);
+    const cached = this.profilePictureCache.get<{ wuid: string; profilePictureUrl: string | null }>(jid);
+
+    if (cached) {
+      return cached;
+    }
 
     try {
       const profilePictureUrl = await this.client.profilePictureUrl(jid, 'image');
 
-      return { wuid: jid, profilePictureUrl };
+      const result = { wuid: jid, profilePictureUrl };
+      this.profilePictureCache.set(jid, result);
+      return result;
     } catch {
-      return { wuid: jid, profilePictureUrl: null };
+      const result = { wuid: jid, profilePictureUrl: null };
+      this.profilePictureCache.set(jid, result);
+      return result;
     }
   }
 

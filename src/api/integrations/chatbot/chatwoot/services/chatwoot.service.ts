@@ -47,6 +47,9 @@ export class ChatwootService {
   // Lock polling delay
   private readonly LOCK_POLLING_DELAY_MS = 300; // Delay between lock status checks
 
+  // Tracks consecutive "inbox not found" failures per instance to auto-disable the integration.
+  private readonly inboxFailureCount = new Map<string, number>();
+
   private provider: any;
 
   constructor(
@@ -425,6 +428,44 @@ export class ChatwootService {
     }
   }
 
+  public healLidContact(instance: InstanceDto, lidJid: string, resolvedJid: string): void {
+    // Fire-and-forget with up to 3 attempts (1 s, 4 s, 16 s backoff).
+    const attempt = async (tries: number) => {
+      try {
+        const existingLidContact = await this.findContactByIdentifier(instance, lidJid);
+        if (!existingLidContact) return;
+
+        const realPhone = resolvedJid.split('@')[0];
+        this.logger.verbose(`Healing @lid contact: ${lidJid} → ${resolvedJid} (phone: +${realPhone})`);
+
+        const updateResult = await this.updateContact(instance, existingLidContact.id, {
+          phone_number: `+${realPhone}`,
+          identifier: resolvedJid,
+        });
+
+        if (updateResult === null) {
+          // Conflict: real phone already exists on another contact — merge them.
+          const targetContact = await this.findContact(instance, realPhone);
+          if (targetContact && targetContact.id !== existingLidContact.id) {
+            this.logger.verbose(
+              `Merging @lid contact (${existingLidContact.id}) into real contact (${targetContact.id})`,
+            );
+            await this.mergeContacts(targetContact.id, existingLidContact.id);
+          }
+        }
+      } catch (error) {
+        if (tries < 3) {
+          const delay = Math.pow(4, tries - 1) * 1000; // 1 s, 4 s, 16 s
+          this.logger.warn(`healLidContact attempt ${tries} failed (${lidJid}): ${error?.message} — retry in ${delay}ms`);
+          setTimeout(() => attempt(tries + 1), delay);
+        } else {
+          this.logger.error(`healLidContact gave up after 3 attempts for ${lidJid}: ${error?.message}`);
+        }
+      }
+    };
+    attempt(1);
+  }
+
   public async findContactByIdentifier(instance: InstanceDto, identifier: string) {
     const client = await this.clientCw(instance);
 
@@ -433,45 +474,15 @@ export class ChatwootService {
       return null;
     }
 
-    // Direct search by query (q) - most common way to search by identifier/email/phone
-    const contact = (await (client as any).get('contacts/search', {
-      params: {
-        q: identifier,
-        sort: 'name',
-      },
-    })) as any;
+    // Search by q= (matches identifier, phone, email, name)
+    const result = await client.contacts.search({
+      accountId: this.provider.accountId,
+      q: identifier,
+    });
 
-    if (contact && contact.data && contact.data.payload && contact.data.payload.length > 0) {
-      return contact.data.payload[0];
-    }
-
-    // Fallback for older API versions or different response structures
-    if (contact && contact.payload && contact.payload.length > 0) {
-      return contact.payload[0];
-    }
-
-    // Try search by attribute
-    const contactByAttr = (await (client as any).post('contacts/filter', {
-      payload: [
-        {
-          attribute_key: 'identifier',
-          filter_operator: 'equal_to',
-          values: [identifier],
-          query_operator: null,
-        },
-      ],
-    })) as any;
-
-    if (contactByAttr && contactByAttr.payload && contactByAttr.payload.length > 0) {
-      return contactByAttr.payload[0];
-    }
-
-    // Check inside data property if using axios interceptors wrapper
-    if (contactByAttr && contactByAttr.data && contactByAttr.data.payload && contactByAttr.data.payload.length > 0) {
-      return contactByAttr.data.payload[0];
-    }
-
-    return null;
+    const payload: any[] = result?.payload ?? [];
+    // Exact match on identifier to avoid false positives from partial q= matches.
+    return payload.find((c: any) => c.identifier === identifier) ?? null;
   }
 
   public async findContact(instance: InstanceDto, phoneNumber: string) {
@@ -630,9 +641,14 @@ export class ChatwootService {
   }
 
   public async createConversation(instance: InstanceDto, body: any) {
-    const isLid = body.key.addressingMode === 'lid';
-    const isGroup = body.key.remoteJid.endsWith('@g.us');
-    const phoneNumber = isLid && !isGroup ? body.key.remoteJidAlt : body.key.remoteJid;
+    const isLid = body.key.addressingMode === 'lid' || body.key.remoteJid?.includes('@lid');
+    const isGroup = (body.key.remoteJidAlt ?? body.key.remoteJid)?.endsWith('@g.us');
+    // Only treat remoteJidAlt as the real phone when it carries a DIFFERENT number than
+    // the LID — the same number with @s.whatsapp.net is Baileys' unresolved-LID fallback.
+    const lidNumber = body.key.remoteJid?.split('@')[0];
+    const altNumber = body.key.remoteJidAlt?.split('@')[0];
+    const validAlt = altNumber && altNumber !== lidNumber ? body.key.remoteJidAlt : undefined;
+    const phoneNumber = isLid && !isGroup ? (validAlt ?? body.key.remoteJid) : body.key.remoteJid;
     const { remoteJid } = body.key;
     const cacheKey = `${instance.instanceName}:createConversation-${remoteJid}`;
     const lockKey = `${instance.instanceName}:lock:createConversation-${remoteJid}`;
@@ -903,6 +919,7 @@ export class ChatwootService {
 
     if (!inbox) {
       this.logger.warn('inbox not found');
+      await this.recordInboxFailure(instance);
       return null;
     }
 
@@ -910,11 +927,36 @@ export class ChatwootService {
 
     if (!findByName) {
       this.logger.warn('inbox not found');
+      await this.recordInboxFailure(instance);
       return null;
     }
 
+    // Reset failure counter on success.
+    this.inboxFailureCount.delete(instance.instanceName);
     this.cache.set(cacheKey, findByName);
     return findByName;
+  }
+
+  private async recordInboxFailure(instance: InstanceDto): Promise<void> {
+    const count = (this.inboxFailureCount.get(instance.instanceName) ?? 0) + 1;
+    this.inboxFailureCount.set(instance.instanceName, count);
+
+    if (count >= 3) {
+      this.logger.warn(
+        `[${instance.instanceName}] Inbox não encontrado por ${count} tentativas consecutivas — desativando integração Chatwoot.`,
+      );
+      this.inboxFailureCount.delete(instance.instanceName);
+      try {
+        await this.prismaRepository.chatwoot.update({
+          where: { instanceId: instance.instanceId },
+          data: { enabled: false },
+        });
+        const waInstance = this.waMonitor.waInstances[instance.instanceName];
+        if (waInstance) waInstance.localChatwoot.enabled = false;
+      } catch (err) {
+        this.logger.error(`Falha ao desativar integração Chatwoot para ${instance.instanceName}: ${err?.message}`);
+      }
+    }
   }
 
   public async createMessage(
@@ -1333,8 +1375,12 @@ export class ChatwootService {
         return { message: 'bot' };
       }
 
-      const chatId =
-        body.conversation.meta.sender?.identifier || body.conversation.meta.sender?.phone_number.replace('+', '');
+      let chatId =
+        body.conversation.meta.sender?.identifier || body.conversation.meta.sender?.phone_number?.replace('+', '');
+      if (chatId?.includes('@lid')) {
+        // @lid JIDs cannot be used for outgoing messages; prefer the real phone number.
+        chatId = body.conversation.meta.sender?.phone_number?.replace('+', '') || chatId.split('@')[0];
+      }
       // Chatwoot to Whatsapp
       const messageReceived = body.content
         ? body.content
