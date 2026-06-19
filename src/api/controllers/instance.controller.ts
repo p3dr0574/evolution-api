@@ -35,6 +35,10 @@ export class InstanceController {
   private readonly logger = new Logger('InstanceController');
 
   public async createInstance(instanceData: InstanceDto) {
+    if (instanceData.instanceName) {
+      instanceData.instanceName = instanceData.instanceName.trim();
+    }
+
     try {
       const instance = channelController.init(instanceData, {
         configService: this.configService,
