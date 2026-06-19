@@ -6,6 +6,10 @@ Baileys
 
 /Docker/.env
 
+# Dev local — credenciais e configs sensíveis de desenvolvimento
+/Docker/dev/chatwoot-local.env
+/Docker/dev/evolution_local.yaml
+
 # Logs
 logs/**.json
 *.log
@@ -34,7 +38,8 @@ lerna-debug.log*
 # Project related
 /instances/*
 !/instances/.gitkeep
-/test/
+/test/*
+!/test/personalizations.integration.test.ts
 /src/env.yml
 /store
 *.env

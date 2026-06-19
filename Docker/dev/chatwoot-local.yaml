@@ -1,0 +1,60 @@
+version: "3.7"
+
+# Chatwoot v4.13.0 — ambiente local de testes
+# Chatwoot disponível em http://192.168.0.101:3000
+# Evolution disponível em http://192.168.0.101:8081
+#
+# Postgres separado (pgvector:pg16) necessário para o Chatwoot v4.13+
+# Evolution continua usando o postgres padrão (porta 5432)
+
+services:
+  chatwoot_pg:
+    image: pgvector/pgvector:pg16
+    networks:
+      - evo_dev_net
+    volumes:
+      - chatwoot_pg_data:/var/lib/postgresql/data
+    environment:
+      - POSTGRES_DB=chatwoot_local
+      - POSTGRES_USER=postgres
+      - POSTGRES_PASSWORD=chatwoot_local_pass
+    restart: unless-stopped
+
+  chatwoot_web:
+    image: chatwoot/chatwoot:v4.13.0
+    command: sh -c "bundle exec rails db:chatwoot_prepare && bundle exec rails s -p 3000 -b 0.0.0.0"
+    entrypoint: docker/entrypoints/rails.sh
+    ports:
+      - "3000:3000"
+    networks:
+      - evo_dev_net
+    volumes:
+      - chatwoot_storage:/app/storage
+    env_file: chatwoot-local.env
+    depends_on:
+      - chatwoot_pg
+    restart: unless-stopped
+
+  chatwoot_sidekiq:
+    image: chatwoot/chatwoot:v4.13.0
+    command: bundle exec sidekiq -C config/sidekiq.yml
+    networks:
+      - evo_dev_net
+    volumes:
+      - chatwoot_storage:/app/storage
+    env_file: chatwoot-local.env
+    depends_on:
+      - chatwoot_pg
+      - chatwoot_web
+    restart: unless-stopped
+
+volumes:
+  chatwoot_pg_data:
+    name: chatwoot_local_pg_data
+  chatwoot_storage:
+    name: chatwoot_local_storage
+
+networks:
+  evo_dev_net:
+    external: true
+    name: evo_dev_net
