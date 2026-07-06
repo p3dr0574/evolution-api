@@ -9,7 +9,7 @@ import { dataPruneService, waMonitor } from '@api/server.module';
 import { Auth, configService, Database, Facebook, ServerShutdown } from '@config/env.config';
 import { Logger } from '@config/logger.config';
 import { fetchLatestWaWebVersion } from '@utils/fetchLatestWaWebVersion';
-import { createQrToken, deleteQrToken, resolveQrToken } from '@utils/qrPublicTokens';
+import { createQrToken, deleteQrToken, getActiveToken, resolveQrToken, revokeByInstance } from '@utils/qrPublicTokens';
 import { NextFunction, Request, Response, Router } from 'express';
 import fs from 'fs';
 import mimeTypes from 'mime-types';
@@ -201,6 +201,11 @@ router.get('/postman', (req, res) => {
 
 // ─── Public QR Code page ───────────────────────────────────────────────────
 
+/**
+ * Create a public QR link for an instance.
+ * Body: { ttl?: number }  — seconds until expiry. 0 = no expiry. Default 900 (15 min).
+ * Creates at most one active link per instance — previous link is revoked automatically.
+ */
 router.post('/instance/qrcode/publicLink/:instanceName', authGuard['apikey'], (req, res) => {
   const { instanceName } = req.params as { instanceName: string };
   const instance = waMonitor.waInstances[instanceName];
@@ -219,10 +224,57 @@ router.post('/instance/qrcode/publicLink/:instanceName', authGuard['apikey'], (r
     instance.connectToWhatsapp().catch(() => {});
   }
 
-  const token = createQrToken(instanceName);
+  const rawTtl = req.body?.ttl;
+  const ttlSeconds = typeof rawTtl === 'number' && rawTtl >= 0 ? rawTtl : 900;
+
+  const token = createQrToken(instanceName, ttlSeconds);
+  const serverUrl = (configService.get('SERVER') as any)?.URL ?? '';
+  const entry = resolveQrToken(token);
+
+  return res.status(HttpStatus.OK).json({
+    token,
+    url: `${serverUrl}/qrcode/${token}`,
+    expiresAt: entry?.expiresAt ?? null,
+  });
+});
+
+/** Revoke an active public QR link by token. */
+router.delete('/instance/qrcode/publicLink/:token', authGuard['apikey'], (req, res) => {
+  const { token } = req.params;
+  const entry = resolveQrToken(token);
+
+  if (!entry) {
+    return res.status(HttpStatus.NOT_FOUND).json({ error: 'Token not found or already expired' });
+  }
+
+  deleteQrToken(token);
+  return res.status(HttpStatus.OK).json({ message: 'Link revoked' });
+});
+
+/** Revoke all active public QR links for an instance. */
+router.delete('/instance/qrcode/publicLink/instance/:instanceName', authGuard['apikey'], (req, res) => {
+  const { instanceName } = req.params as { instanceName: string };
+  const revoked = revokeByInstance(instanceName);
+  return res.status(HttpStatus.OK).json({ revoked });
+});
+
+/** Get the currently active public QR link for an instance (if any). */
+router.get('/instance/qrcode/publicLink/:instanceName', authGuard['apikey'], (req, res) => {
+  const { instanceName } = req.params as { instanceName: string };
+  const token = getActiveToken(instanceName);
+
+  if (!token) {
+    return res.status(HttpStatus.NOT_FOUND).json({ error: 'No active public link for this instance' });
+  }
+
+  const entry = resolveQrToken(token);
   const serverUrl = (configService.get('SERVER') as any)?.URL ?? '';
 
-  return res.status(HttpStatus.OK).json({ url: `${serverUrl}/qrcode/${token}` });
+  return res.status(HttpStatus.OK).json({
+    token,
+    url: `${serverUrl}/qrcode/${token}`,
+    expiresAt: entry?.expiresAt ?? null,
+  });
 });
 
 router.get('/qrcode/:token/data', (req, res) => {
