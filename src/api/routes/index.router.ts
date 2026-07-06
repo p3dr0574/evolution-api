@@ -308,10 +308,11 @@ router.get('/qrcode/:token/data', (req, res) => {
 
 router.get('/qrcode/:token', (_req, res) => {
   res.setHeader('Content-Type', 'text/html; charset=utf-8');
-  res.send(buildQrPage());
+  const serverUrl = (configService.get('SERVER') as any)?.URL ?? '';
+  res.send(buildQrPage(serverUrl));
 });
 
-function buildQrPage(): string {
+function buildQrPage(serverUrl = ''): string {
   return `<!DOCTYPE html>
 <html lang="pt-BR">
 <head>
@@ -403,9 +404,12 @@ function buildQrPage(): string {
     el.textContent = 'Link expira em '+formatTime(diff);
   }
 
+  const BASE_URL = ${JSON.stringify(serverUrl)};
+
   async function poll(){
     try{
-      const r = await fetch('/qrcode/'+token+'/data');
+      const base = BASE_URL || (location.origin + (location.pathname.split('/qrcode/')[0] || ''));
+      const r = await fetch(base+'/qrcode/'+token+'/data');
       const d = await r.json();
 
       if(d.status==='connected'){

@@ -1549,8 +1549,8 @@ export class BaileysStartupService extends ChannelStartupService {
                 try {
                   if (isVideo && !this.configService.get<S3>('S3').SAVE_VIDEO) {
                     this.logger.warn('Video upload is disabled. Skipping video upload.');
-                    // Skip video upload by returning early from this block
-                    return;
+                    // `continue` (not `return`) so other messages in the batch are still processed.
+                    continue;
                   }
 
                   const message: any = received;
@@ -1565,7 +1565,7 @@ export class BaileysStartupService extends ChannelStartupService {
 
                     if (!media) {
                       this.logger.verbose('No valid media to upload (messageContextInfo only), skipping MinIO');
-                      return;
+                      continue;
                     }
 
                     const { buffer, mediaType, fileName, size } = media;
