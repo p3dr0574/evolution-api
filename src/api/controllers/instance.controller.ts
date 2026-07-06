@@ -1,4 +1,4 @@
-import { ChangeApikeyDto, InstanceDto, RenameInstanceDto, SetPresenceDto } from '@api/dto/instance.dto';
+import { ChangeApikeyDto, InstanceDto, RenameInstanceDto, SetDisconnectAlertDto, SetPresenceDto } from '@api/dto/instance.dto';
 import { ChatwootService } from '@api/integrations/chatbot/chatwoot/services/chatwoot.service';
 import { ProviderFiles } from '@api/provider/sessions';
 import { PrismaRepository } from '@api/repository/repository.service';
@@ -430,6 +430,50 @@ export class InstanceController {
         apikey: instance.token,
       },
     };
+  }
+
+  public async setDisconnectAlert({ instanceName }: InstanceDto, data: SetDisconnectAlertDto) {
+    const inst = await this.prismaRepository.instance.findUnique({ where: { name: instanceName } });
+    if (!inst) throw new BadRequestException(`Instance "${instanceName}" not found`);
+
+    const saved = await this.prismaRepository.disconnectAlert.upsert({
+      where: { instanceId: inst.id },
+      create: {
+        enabled: data.enabled,
+        alertNumber: data.alertNumber ?? null,
+        senderName: data.senderName ?? null,
+        message: data.message ?? null,
+        instanceId: inst.id,
+      },
+      update: {
+        enabled: data.enabled,
+        alertNumber: data.alertNumber ?? null,
+        senderName: data.senderName ?? null,
+        message: data.message ?? null,
+      },
+    });
+
+    // Keep in-memory config in sync
+    const runtime = this.waMonitor.waInstances[instanceName];
+    if (runtime) {
+      runtime.localDisconnectAlert.enabled = saved.enabled;
+      runtime.localDisconnectAlert.alertNumber = saved.alertNumber ?? undefined;
+      runtime.localDisconnectAlert.senderName = saved.senderName ?? undefined;
+      runtime.localDisconnectAlert.message = saved.message ?? undefined;
+    }
+
+    return saved;
+  }
+
+  public async findDisconnectAlert({ instanceName }: InstanceDto) {
+    const inst = await this.prismaRepository.instance.findUnique({ where: { name: instanceName } });
+    if (!inst) throw new BadRequestException(`Instance "${instanceName}" not found`);
+
+    const data = await this.prismaRepository.disconnectAlert.findUnique({
+      where: { instanceId: inst.id },
+    });
+
+    return data ?? { enabled: false, alertNumber: null, senderName: null, message: null };
   }
 
   public async fetchInstances({ instanceName, instanceId, number }: InstanceDto, key: string) {

@@ -246,6 +246,18 @@ export const renameInstanceSchema: JSONSchema7 = {
   required: ['newName'],
 };
 
+export const setDisconnectAlertSchema: JSONSchema7 = {
+  $id: v4(),
+  type: 'object',
+  properties: {
+    enabled: { type: 'boolean' },
+    alertNumber: { type: 'string', maxLength: 100 },
+    senderName: { type: 'string', maxLength: 100 },
+    message: { type: 'string', maxLength: 500 },
+  },
+  required: ['enabled'],
+};
+
 export const changeApikeyInstanceSchema: JSONSchema7 = {
   $id: v4(),
   type: 'object',

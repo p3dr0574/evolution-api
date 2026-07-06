@@ -116,13 +116,25 @@ export declare namespace wa {
     createdAt?: number;
   };
 
+  export type LocalDisconnectAlert = {
+    enabled?: boolean;
+    alertNumber?: string;
+    senderName?: string;
+    message?: string;
+  };
+
   export type LocalProxy = {
     enabled?: boolean;
+    id?: string;
+    name?: string;
     host?: string;
     port?: string;
     protocol?: string;
     username?: string;
     password?: string;
+    source?: 'none' | 'environment' | 'specific' | 'list';
+    mode?: 'NONE' | 'SPECIFIC' | 'LIST';
+    failOpen?: boolean;
   };
 
   export type StateConnection = {

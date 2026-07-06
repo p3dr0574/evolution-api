@@ -57,7 +57,7 @@ import { chatwootImport } from '@api/integrations/chatbot/chatwoot/utils/chatwoo
 import * as s3Service from '@api/integrations/storage/s3/libs/minio.server';
 import { ProviderFiles } from '@api/provider/sessions';
 import { PrismaRepository, Query } from '@api/repository/repository.service';
-import { chatbotController, waMonitor } from '@api/server.module';
+import { chatbotController, disconnectAlertService, waMonitor } from '@api/server.module';
 import { CacheService } from '@api/services/cache.service';
 import { ChannelStartupService } from '@api/services/channel.service';
 import { Events, MessageSubtype, TypeMediaMessage, wa } from '@api/types/wa.types';
@@ -531,6 +531,10 @@ export class BaileysStartupService extends ChannelStartupService {
           );
         }
 
+        disconnectAlertService
+          .onDisconnect(this.instance.name, this.instanceId)
+          .catch((err) => this.logger.error(`DisconnectAlert error: ${err}`));
+
         this.eventEmitter.emit('logout.instance', this.instance.name, 'inner');
         this.client?.ws?.close();
         this.client.end(new Error('Close connection'));
@@ -576,6 +580,8 @@ export class BaileysStartupService extends ChannelStartupService {
           connectionStatus: 'open',
         },
       });
+
+      disconnectAlertService.markConnected(this.instance.name);
 
       if (this.configService.get<Chatwoot>('CHATWOOT').ENABLED && this.localChatwoot?.enabled) {
         this.chatwootService.eventWhatsapp(
@@ -792,7 +798,7 @@ export class BaileysStartupService extends ChannelStartupService {
 
   public async connectToWhatsapp(number?: string): Promise<WASocket> {
     try {
-      await Promise.all([this.loadChatwoot(), this.loadSettings(), this.loadWebhook(), this.loadProxy()]);
+      await Promise.all([this.loadChatwoot(), this.loadSettings(), this.loadWebhook(), this.loadProxy(), this.loadDisconnectAlert()]);
 
       // Remontar o messageProcessor para garantir que está funcionando após reconexão
       this.messageProcessor.mount({

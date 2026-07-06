@@ -85,6 +85,7 @@ model Instance {
   Chatwoot                Chatwoot?
   Label                   Label[]
   Proxy                   Proxy?
+  DisconnectAlert         DisconnectAlert?
   Setting                 Setting?
   Rabbitmq                Rabbitmq?
   Nats                    Nats?
@@ -112,6 +113,12 @@ model Instance {
   N8nSetting              N8nSetting[]
   Evoai                   Evoai[]
   EvoaiSetting            EvoaiSetting?
+  InstanceProxyPolicy     InstanceProxyPolicy?
+  InstanceProxyCandidate  InstanceProxyCandidate[]
+
+  @@index([token])
+  @@index([number])
+  @@index([clientName])
 }
 
 model Session {
@@ -178,6 +185,8 @@ model Message {
   session   IntegrationSession? @relation(fields: [sessionId], references: [id])
 
   @@index([instanceId])
+  @@index([messageTimestamp])
+  @@index([instanceId, messageTimestamp])
 }
 
 model MessageUpdate {
@@ -195,6 +204,7 @@ model MessageUpdate {
 
   @@index([instanceId])
   @@index([messageId])
+  @@index([instanceId, keyId])
 }
 
 model Webhook {
@@ -211,6 +221,32 @@ model Webhook {
   instanceId      String    @unique
 
   @@index([instanceId])
+}
+
+model WebhookDelivery {
+  id             String    @id @default(cuid())
+  instanceName   String    @db.VarChar(255)
+  scope          String    @db.VarChar(20)
+  event          String    @db.VarChar(100)
+  destination    String    @db.VarChar(500)
+  payload        Json      @db.JsonB
+  headers        Json?     @db.JsonB
+  status         String    @default("PENDING") @db.VarChar(20)
+  attempts       Int       @default(0) @db.Integer
+  maxAttempts    Int       @default(10) @db.Integer
+  nextAttemptAt  DateTime? @db.Timestamp
+  lastAttemptAt  DateTime? @db.Timestamp
+  deliveredAt    DateTime? @db.Timestamp
+  lastStatusCode Int?      @db.Integer
+  lastError      String?   @db.Text
+  createdAt      DateTime  @default(now()) @db.Timestamp
+  updatedAt      DateTime  @updatedAt @db.Timestamp
+
+  @@index([instanceName, status])
+  @@index([status, nextAttemptAt])
+  @@index([createdAt])
+  @@index([instanceName, createdAt])
+  @@index([status, createdAt])
 }
 
 model Chatwoot {
@@ -264,6 +300,79 @@ model Proxy {
   updatedAt  DateTime  @updatedAt @db.Timestamp
   Instance   Instance  @relation(fields: [instanceId], references: [id], onDelete: Cascade)
   instanceId String    @unique
+}
+
+model DisconnectAlert {
+  id           String    @id @default(cuid())
+  enabled      Boolean   @default(false) @db.Boolean
+  alertNumber  String?   @db.VarChar(100)
+  senderName   String?   @db.VarChar(100)
+  message      String?   @db.VarChar(500)
+  createdAt    DateTime? @default(now()) @db.Timestamp
+  updatedAt    DateTime  @updatedAt @db.Timestamp
+  Instance     Instance  @relation(fields: [instanceId], references: [id], onDelete: Cascade)
+  instanceId   String    @unique
+}
+
+model ProxyEndpoint {
+  id                     String                   @id @default(cuid())
+  name                   String                   @unique @db.VarChar(100)
+  enabled                Boolean                  @default(true) @db.Boolean
+  host                   String                   @db.VarChar(255)
+  port                   String                   @db.VarChar(20)
+  protocol               String                   @db.VarChar(20)
+  username               String?                  @db.VarChar(255)
+  password               String?                  @db.VarChar(255)
+  maxConcurrentInstances Int?                     @db.Integer
+  status                 String                   @default("UNKNOWN") @db.VarChar(20)
+  failureCount           Int                      @default(0) @db.Integer
+  lastCheckAt            DateTime?                @db.Timestamp
+  lastSuccessAt          DateTime?                @db.Timestamp
+  lastFailureAt          DateTime?                @db.Timestamp
+  cooldownUntil          DateTime?                @db.Timestamp
+  lastError              String?                  @db.Text
+  createdAt              DateTime?                @default(now()) @db.Timestamp
+  updatedAt              DateTime                 @updatedAt @db.Timestamp
+  ActivePolicies         InstanceProxyPolicy[]    @relation("ActiveProxyEndpoint")
+  Candidates             InstanceProxyCandidate[]
+
+  @@index([enabled, status, cooldownUntil])
+}
+
+model InstanceProxyPolicy {
+  id                  String         @id @default(cuid())
+  mode                String         @default("NONE") @db.VarChar(20)
+  rotationEnabled     Boolean        @default(true) @db.Boolean
+  maxFailures         Int            @default(2) @db.Integer
+  cooldownSeconds     Int            @default(300) @db.Integer
+  failOpen            Boolean        @default(false) @db.Boolean
+  consecutiveFailures Int            @default(0) @db.Integer
+  lastRotatedAt       DateTime?      @db.Timestamp
+  createdAt           DateTime?      @default(now()) @db.Timestamp
+  updatedAt           DateTime       @updatedAt @db.Timestamp
+  Instance            Instance       @relation(fields: [instanceId], references: [id], onDelete: Cascade)
+  instanceId          String         @unique
+  ActiveProxy         ProxyEndpoint? @relation("ActiveProxyEndpoint", fields: [activeProxyId], references: [id], onDelete: SetNull)
+  activeProxyId       String?
+
+  @@index([activeProxyId])
+}
+
+model InstanceProxyCandidate {
+  id         String        @id @default(cuid())
+  priority   Int           @default(0) @db.Integer
+  enabled    Boolean       @default(true) @db.Boolean
+  lastUsedAt DateTime?     @db.Timestamp
+  createdAt  DateTime?     @default(now()) @db.Timestamp
+  updatedAt  DateTime      @updatedAt @db.Timestamp
+  Instance   Instance      @relation(fields: [instanceId], references: [id], onDelete: Cascade)
+  instanceId String
+  Proxy      ProxyEndpoint @relation(fields: [proxyId], references: [id], onDelete: Cascade)
+  proxyId    String
+
+  @@unique([instanceId, proxyId])
+  @@index([instanceId, enabled, priority])
+  @@index([proxyId])
 }
 
 model Setting {
@@ -473,6 +582,9 @@ model IntegrationSession {
   parameters Json?         @db.JsonB
 
   botId String?
+
+  @@index([updatedAt])
+  @@index([instanceId, remoteJid, createdAt])
 }
 
 model OpenaiSetting {
@@ -663,6 +775,8 @@ model IsOnWhatsapp {
   lid        String?  @db.VarChar(100)
   createdAt  DateTime @default(now()) @db.Timestamp
   updatedAt  DateTime @updatedAt @db.Timestamp
+
+  @@index([updatedAt])
 }
 
 model N8n {

@@ -37,6 +37,7 @@ export class ChannelStartupService {
   public readonly localProxy: wa.LocalProxy = {};
   public readonly localSettings: wa.LocalSettings = {};
   public readonly localWebhook: wa.LocalWebHook = {};
+  public readonly localDisconnectAlert: wa.LocalDisconnectAlert = {};
 
   public chatwootService = new ChatwootService(
     waMonitor,
@@ -249,6 +250,17 @@ export class ChannelStartupService {
     this.localChatwoot.daysLimitImportMessages = data?.daysLimitImportMessages;
   }
 
+  public async loadDisconnectAlert() {
+    const data = await this.prismaRepository.disconnectAlert.findUnique({
+      where: { instanceId: this.instanceId },
+    });
+
+    this.localDisconnectAlert.enabled = data?.enabled ?? false;
+    this.localDisconnectAlert.alertNumber = data?.alertNumber ?? undefined;
+    this.localDisconnectAlert.senderName = data?.senderName ?? undefined;
+    this.localDisconnectAlert.message = data?.message ?? undefined;
+  }
+
   public async setChatwoot(data: ChatwootDto) {
     if (!this.configService.get<Chatwoot>('CHATWOOT').ENABLED) {
       return;
@@ -363,32 +375,255 @@ export class ChannelStartupService {
   }
 
   public async loadProxy() {
-    this.localProxy.enabled = false;
+    this.clearLocalProxy();
 
-    const proxyConfig = this.configService.get<Proxy>('PROXY');
-    if (proxyConfig.HOST) {
-      this.localProxy.enabled = true;
-      this.localProxy.host = proxyConfig.HOST;
-      this.localProxy.port = proxyConfig.PORT || '80';
-      this.localProxy.protocol = proxyConfig.PROTOCOL || 'http';
-      this.localProxy.username = proxyConfig.USERNAME;
-      this.localProxy.password = proxyConfig.PASSWORD;
-    }
-
-    const data = await this.prismaRepository.proxy.findUnique({
+    const specificProxy = await this.prismaRepository.proxy.findUnique({
       where: {
         instanceId: this.instanceId,
       },
     });
 
-    if (data?.enabled) {
-      this.localProxy.enabled = true;
-      this.localProxy.host = data?.host;
-      this.localProxy.port = data?.port;
-      this.localProxy.protocol = data?.protocol;
-      this.localProxy.username = data?.username;
-      this.localProxy.password = data?.password;
+    if (specificProxy?.enabled) {
+      this.applyLocalProxy(specificProxy, 'specific', 'SPECIFIC');
+      return;
     }
+
+    const policy = await this.prismaRepository.instanceProxyPolicy.findUnique({
+      where: { instanceId: this.instanceId },
+      include: { ActiveProxy: true },
+    });
+
+    if (policy) {
+      this.localProxy.mode = policy.mode as wa.LocalProxy['mode'];
+      this.localProxy.failOpen = policy.failOpen;
+
+      if (policy.mode === 'NONE') {
+        return;
+      }
+
+      if (policy.mode === 'SPECIFIC') {
+        throw new Error(`Instance "${this.instanceName}" is configured for a specific proxy, but it is not enabled`);
+      }
+
+      if (policy.mode === 'LIST') {
+        const activeCandidate = policy.activeProxyId
+          ? await this.prismaRepository.instanceProxyCandidate.findUnique({
+              where: {
+                instanceId_proxyId: {
+                  instanceId: this.instanceId,
+                  proxyId: policy.activeProxyId,
+                },
+              },
+            })
+          : null;
+        const activeProxyAvailable =
+          activeCandidate?.enabled &&
+          policy.ActiveProxy?.enabled &&
+          (!policy.ActiveProxy.cooldownUntil || policy.ActiveProxy.cooldownUntil <= new Date());
+        const endpoint = activeProxyAvailable ? policy.ActiveProxy : await this.selectProxyEndpoint();
+
+        if (endpoint) {
+          this.applyLocalProxy(endpoint, 'list', 'LIST');
+          return;
+        }
+
+        if (!policy.failOpen) {
+          throw new Error(`No available proxy candidate for instance "${this.instanceName}"`);
+        }
+
+        this.logger.warn(
+          `No proxy candidate available for "${this.instanceName}". Connecting directly due to failOpen.`,
+        );
+        return;
+      }
+    }
+
+    const proxyConfig = this.configService.get<Proxy>('PROXY');
+    if (proxyConfig.HOST) {
+      this.applyLocalProxy(
+        {
+          host: proxyConfig.HOST,
+          port: proxyConfig.PORT || '80',
+          protocol: proxyConfig.PROTOCOL || 'http',
+          username: proxyConfig.USERNAME,
+          password: proxyConfig.PASSWORD,
+        },
+        'environment',
+      );
+    }
+  }
+
+  private clearLocalProxy() {
+    for (const key of Object.keys(this.localProxy)) {
+      delete this.localProxy[key];
+    }
+
+    this.localProxy.enabled = false;
+    this.localProxy.source = 'none';
+  }
+
+  private applyLocalProxy(
+    proxy: {
+      id?: string;
+      name?: string;
+      host: string;
+      port: string;
+      protocol: string;
+      username?: string;
+      password?: string;
+    },
+    source: wa.LocalProxy['source'],
+    mode?: wa.LocalProxy['mode'],
+  ) {
+    Object.assign(this.localProxy, {
+      enabled: true,
+      id: proxy.id,
+      name: proxy.name,
+      host: proxy.host,
+      port: proxy.port,
+      protocol: proxy.protocol,
+      username: proxy.username,
+      password: proxy.password,
+      source,
+      mode,
+    });
+  }
+
+  private async selectProxyEndpoint(excludeProxyId?: string) {
+    const candidates = await this.prismaRepository.instanceProxyCandidate.findMany({
+      where: { instanceId: this.instanceId, enabled: true },
+      include: { Proxy: true },
+      orderBy: [{ priority: 'asc' }, { lastUsedAt: 'asc' }],
+    });
+    const now = new Date();
+
+    const available = [];
+    for (const candidate of candidates) {
+      if (!candidate.Proxy.enabled || (candidate.Proxy.cooldownUntil && candidate.Proxy.cooldownUntil > now)) {
+        continue;
+      }
+
+      const activeCount = await this.prismaRepository.instanceProxyPolicy.count({
+        where: {
+          activeProxyId: candidate.proxyId,
+          instanceId: { not: this.instanceId },
+        },
+      });
+      if (candidate.Proxy.maxConcurrentInstances !== null && activeCount >= candidate.Proxy.maxConcurrentInstances) {
+        continue;
+      }
+
+      available.push(candidate);
+    }
+
+    const selected = available.find((candidate) => candidate.proxyId !== excludeProxyId) ?? available[0];
+    if (!selected) return null;
+
+    await this.prismaRepository.$transaction([
+      this.prismaRepository.instanceProxyPolicy.update({
+        where: { instanceId: this.instanceId },
+        data: {
+          activeProxyId: selected.proxyId,
+          consecutiveFailures: 0,
+          lastRotatedAt: new Date(),
+        },
+      }),
+      this.prismaRepository.instanceProxyCandidate.update({
+        where: {
+          instanceId_proxyId: {
+            instanceId: this.instanceId,
+            proxyId: selected.proxyId,
+          },
+        },
+        data: { lastUsedAt: new Date() },
+      }),
+    ]);
+
+    return selected.Proxy;
+  }
+
+  public async rotateProxy(reason = 'manual') {
+    const policy = await this.prismaRepository.instanceProxyPolicy.findUnique({
+      where: { instanceId: this.instanceId },
+    });
+    if (!policy || policy.mode !== 'LIST') return null;
+
+    const endpoint = await this.selectProxyEndpoint(policy.activeProxyId);
+    if (!endpoint) {
+      if (!policy.failOpen) return null;
+      this.clearLocalProxy();
+      this.localProxy.mode = 'LIST';
+      this.localProxy.failOpen = true;
+      return null;
+    }
+
+    this.applyLocalProxy(endpoint, 'list', 'LIST');
+    this.logger.warn(`Proxy rotated for "${this.instanceName}" to "${endpoint.name}" (${reason}).`);
+    return endpoint;
+  }
+
+  public async reportProxyFailure(error: unknown) {
+    if (this.localProxy.source !== 'list' || !this.localProxy.id) return false;
+
+    const policy = await this.prismaRepository.instanceProxyPolicy.findUnique({
+      where: { instanceId: this.instanceId },
+    });
+    if (!policy) return false;
+
+    const failureCount = policy.consecutiveFailures + 1;
+    const shouldRotate = policy.rotationEnabled && failureCount >= policy.maxFailures;
+    const errorMessage = error instanceof Error ? error.message : String(error ?? 'Proxy connection failed');
+
+    await this.prismaRepository.$transaction([
+      this.prismaRepository.instanceProxyPolicy.update({
+        where: { instanceId: this.instanceId },
+        data: { consecutiveFailures: failureCount },
+      }),
+      this.prismaRepository.proxyEndpoint.update({
+        where: { id: this.localProxy.id },
+        data: {
+          failureCount: { increment: 1 },
+          status: failureCount >= policy.maxFailures ? 'DOWN' : 'DEGRADED',
+          lastCheckAt: new Date(),
+          lastFailureAt: new Date(),
+          lastError: errorMessage,
+          cooldownUntil: shouldRotate ? new Date(Date.now() + policy.cooldownSeconds * 1000) : undefined,
+        },
+      }),
+    ]);
+
+    if (!shouldRotate) return false;
+    return !!(await this.rotateProxy('automatic'));
+  }
+
+  public async markProxyHealthy() {
+    if (this.localProxy.source !== 'list' || !this.localProxy.id) return;
+
+    await this.prismaRepository.$transaction([
+      this.prismaRepository.instanceProxyPolicy.update({
+        where: { instanceId: this.instanceId },
+        data: { consecutiveFailures: 0 },
+      }),
+      this.prismaRepository.proxyEndpoint.update({
+        where: { id: this.localProxy.id },
+        data: {
+          status: 'HEALTHY',
+          failureCount: 0,
+          lastCheckAt: new Date(),
+          lastSuccessAt: new Date(),
+          cooldownUntil: null,
+          lastError: null,
+        },
+      }),
+    ]);
+  }
+
+  public reconnectWithCurrentProxy() {
+    const state = (this as any).connectionStatus?.state;
+    if (state !== 'open' && state !== 'connecting') return;
+
+    this.client?.ws?.close();
+    this.client?.end(new Error('proxy changed'));
   }
 
   public async setProxy(data: ProxyDto) {

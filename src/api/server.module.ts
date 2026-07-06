@@ -40,6 +40,8 @@ import { S3Service } from './integrations/storage/s3/services/s3.service';
 import { ProviderFiles } from './provider/sessions';
 import { PrismaRepository } from './repository/repository.service';
 import { CacheService } from './services/cache.service';
+import { DataPruneService } from './services/data-prune.service';
+import { DisconnectAlertService } from './services/disconnect-alert.service';
 import { WAMonitoringService } from './services/monitor.service';
 import { ProxyService } from './services/proxy.service';
 import { SettingsService } from './services/settings.service';
@@ -55,12 +57,14 @@ if (configService.get<Chatwoot>('CHATWOOT').ENABLED) {
 export const cache = new CacheService(new CacheEngine(configService, 'instance').getEngine());
 const baileysCache = new CacheService(new CacheEngine(configService, 'baileys').getEngine());
 
-let providerFiles: ProviderFiles = null;
+export let providerFiles: ProviderFiles = null;
 if (configService.get<ProviderSession>('PROVIDER').ENABLED) {
   providerFiles = new ProviderFiles(configService);
 }
 
 export const prismaRepository = new PrismaRepository(configService);
+export const dataPruneService = new DataPruneService(prismaRepository);
+export const disconnectAlertService = new DisconnectAlertService(prismaRepository, configService);
 
 export const waMonitor = new WAMonitoringService(
   eventEmitter,
@@ -78,7 +82,7 @@ export const s3Controller = new S3Controller(s3Service);
 const templateService = new TemplateService(waMonitor, prismaRepository, configService);
 export const templateController = new TemplateController(templateService);
 
-const proxyService = new ProxyService(waMonitor);
+const proxyService = new ProxyService(waMonitor, prismaRepository);
 export const proxyController = new ProxyController(proxyService, waMonitor);
 
 const chatwootService = new ChatwootService(waMonitor, configService, prismaRepository, chatwootCache);

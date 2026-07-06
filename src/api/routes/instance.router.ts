@@ -1,8 +1,14 @@
 import { RouterBroker } from '@api/abstract/abstract.router';
-import { ChangeApikeyDto, InstanceDto, RenameInstanceDto, SetPresenceDto } from '@api/dto/instance.dto';
+import { ChangeApikeyDto, InstanceDto, RenameInstanceDto, SetDisconnectAlertDto, SetPresenceDto } from '@api/dto/instance.dto';
 import { instanceController } from '@api/server.module';
 import { ConfigService } from '@config/env.config';
-import { changeApikeyInstanceSchema, instanceSchema, presenceOnlySchema, renameInstanceSchema } from '@validate/validate.schema';
+import {
+  changeApikeyInstanceSchema,
+  instanceSchema,
+  presenceOnlySchema,
+  renameInstanceSchema,
+  setDisconnectAlertSchema,
+} from '@validate/validate.schema';
 import { RequestHandler, Router } from 'express';
 
 import { HttpStatus } from './index.router';
@@ -112,6 +118,26 @@ export class InstanceRouter extends RouterBroker {
           schema: null,
           ClassRef: InstanceDto,
           execute: (instance) => instanceController.deleteInstance(instance),
+        });
+
+        return res.status(HttpStatus.OK).json(response);
+      })
+      .post(this.routerPath('disconnectAlert/set'), ...guards, async (req, res) => {
+        const response = await this.dataValidate<SetDisconnectAlertDto>({
+          request: req,
+          schema: setDisconnectAlertSchema,
+          ClassRef: SetDisconnectAlertDto,
+          execute: (instance, data) => instanceController.setDisconnectAlert(instance, data),
+        });
+
+        return res.status(HttpStatus.OK).json(response);
+      })
+      .get(this.routerPath('disconnectAlert/find'), ...guards, async (req, res) => {
+        const response = await this.dataValidate<InstanceDto>({
+          request: req,
+          schema: null,
+          ClassRef: InstanceDto,
+          execute: (instance) => instanceController.findDisconnectAlert(instance),
         });
 
         return res.status(HttpStatus.OK).json(response);

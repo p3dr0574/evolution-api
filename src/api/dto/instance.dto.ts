@@ -65,3 +65,10 @@ export class RenameInstanceDto {
 export class ChangeApikeyDto {
   newApikey: string;
 }
+
+export class SetDisconnectAlertDto {
+  enabled: boolean;
+  alertNumber?: string;
+  senderName?: string;
+  message?: string;
+}
