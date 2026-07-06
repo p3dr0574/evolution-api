@@ -1,6 +1,6 @@
 {
   "name": "evolution-api",
-  "version": "2.3.7",
+  "version": "2.4.1",
   "description": "Rest api for communication with WhatsApp",
   "main": "./dist/main.js",
   "type": "commonjs",
@@ -10,6 +10,7 @@
     "start:prod": "node --network-family-autoselection-attempt-timeout=1000 dist/main",
     "dev:server": "tsx watch ./src/main.ts",
     "test": "tsx watch ./test/all.test.ts",
+    "test:personalizations": "tsx --test ./test/personalizations.integration.test.ts",
     "lint": "eslint --fix --ext .ts src",
     "lint:check": "eslint --ext .ts src",
     "commit": "cz",
