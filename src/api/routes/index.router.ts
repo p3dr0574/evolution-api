@@ -348,9 +348,10 @@ function buildQrPage(serverUrl = ''): string {
   .success h2{font-size:1.2rem;font-weight:700}
   .success p{font-size:.875rem;color:var(--sub)}
   /* expired */
-  .expired{display:none;flex-direction:column;align-items:center;gap:.75rem}
+  .expired{display:none;flex-direction:column;align-items:center;gap:.75rem;text-align:center}
   .expired-icon{font-size:2.5rem}
-  .expired p{font-size:.875rem;color:var(--sub)}
+  .expired h2{font-size:1.2rem;font-weight:700;color:var(--text)}
+  .expired p{font-size:.875rem;color:var(--sub);max-width:280px}
   /* main hide/show */
   body.done .qr-section{display:none}
   body.done .success{display:flex}
@@ -382,7 +383,8 @@ function buildQrPage(serverUrl = ''): string {
   <div class="expired">
     <div class="expired-icon">⏱</div>
     <h2>Link expirado</h2>
-    <p>Gere um novo link no painel para conectar novamente.</p>
+    <p>O tempo de validade deste link chegou ao fim.</p>
+    <p style="margin-top:.25rem">Para conectar novamente, acesse o painel e gere um novo link de QR Code.</p>
   </div>
 </div>
 <script>
