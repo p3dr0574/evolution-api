@@ -301,6 +301,7 @@ router.get('/qrcode/:token/data', (req, res) => {
   return res.status(HttpStatus.OK).json({
     status: 'waiting',
     qrCode: qr?.base64 ?? null,
+    pairingCode: qr?.pairingCode ?? null,
     expiresAt: entry.expiresAt,
   });
 });
@@ -312,6 +313,9 @@ router.get('/qrcode/:token', (_req, res) => {
 });
 
 function buildQrPage(serverUrl = ''): string {
+  // SVG ring: r=108, so circumference ≈ 678.6
+  const RING_R = 108;
+  const RING_C = +(2 * Math.PI * RING_R).toFixed(1);
   return `<!DOCTYPE html>
 <html lang="pt-BR">
 <head>
@@ -319,159 +323,344 @@ function buildQrPage(serverUrl = ''): string {
 <meta name="viewport" content="width=device-width,initial-scale=1"/>
 <title>Conectar WhatsApp</title>
 <style>
-  :root{--bg:#f0f2f5;--card:#fff;--text:#111;--sub:#555;--accent:#25D366;--border:#e0e0e0;--shadow:0 4px 24px rgba(0,0,0,.08)}
-  @media(prefers-color-scheme:dark){:root{--bg:#0d1117;--card:#161b22;--text:#e6edf3;--sub:#8b949e;--accent:#25D366;--border:#30363d;--shadow:0 4px 24px rgba(0,0,0,.4)}}
-  *{box-sizing:border-box;margin:0;padding:0}
-  body{background:var(--bg);color:var(--text);font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;min-height:100vh;display:flex;align-items:center;justify-content:center;padding:1rem}
-  .card{background:var(--card);border:1px solid var(--border);border-radius:20px;box-shadow:var(--shadow);padding:2.5rem 2rem;max-width:380px;width:100%;text-align:center}
-  .logo{width:48px;height:48px;margin:0 auto 1.25rem;background:var(--accent);border-radius:50%;display:flex;align-items:center;justify-content:center}
-  .logo svg{width:28px;height:28px;fill:#fff}
-  h1{font-size:1.25rem;font-weight:700;margin-bottom:.4rem}
-  p.sub{font-size:.875rem;color:var(--sub);margin-bottom:1.75rem;line-height:1.5}
-  .qr-wrap{position:relative;width:220px;height:220px;margin:0 auto 1.75rem;border-radius:12px;overflow:hidden;background:var(--border)}
-  .qr-wrap img{width:100%;height:100%;display:block;transition:opacity .3s}
-  .qr-wrap.loading img{opacity:.3}
-  .spinner{position:absolute;inset:0;display:none;align-items:center;justify-content:center}
-  .spinner svg{animation:spin 1s linear infinite;width:36px;height:36px;stroke:var(--accent);stroke-width:3;fill:none}
-  @keyframes spin{to{transform:rotate(360deg)}}
-  .qr-wrap.loading .spinner{display:flex}
-  .status{font-size:.8rem;color:var(--sub);display:flex;align-items:center;justify-content:center;gap:.4rem;margin-bottom:1.25rem}
-  .dot{width:8px;height:8px;border-radius:50%;background:var(--accent);animation:pulse 2s infinite}
-  @keyframes pulse{0%,100%{opacity:1}50%{opacity:.3}}
-  .timer{font-size:.75rem;color:var(--sub);margin-top:.5rem}
-  /* connected state */
-  .success{display:none;flex-direction:column;align-items:center;gap:1rem}
-  .check{width:72px;height:72px;background:var(--accent);border-radius:50%;display:flex;align-items:center;justify-content:center;animation:pop .4s ease}
-  @keyframes pop{from{transform:scale(.5);opacity:0}to{transform:scale(1);opacity:1}}
-  .check svg{width:40px;height:40px;stroke:#fff;stroke-width:3;fill:none}
-  .success h2{font-size:1.2rem;font-weight:700}
-  .success p{font-size:.875rem;color:var(--sub)}
-  /* expired */
-  .expired{display:none;flex-direction:column;align-items:center;gap:.75rem;text-align:center}
-  .expired-icon{font-size:2.5rem}
-  .expired h2{font-size:1.2rem;font-weight:700;color:var(--text)}
-  .expired p{font-size:.875rem;color:var(--sub);max-width:280px}
-  /* standby */
-  .standby{display:none;flex-direction:column;align-items:center;gap:.75rem;text-align:center}
-  .standby-icon{font-size:2.5rem}
-  .standby h2{font-size:1.2rem;font-weight:700;color:var(--text)}
-  .standby p{font-size:.875rem;color:var(--sub);max-width:300px}
-  /* main hide/show */
-  body.done .qr-section{display:none}
-  body.done .success{display:flex}
-  body.expired .qr-section{display:none}
-  body.expired .expired{display:flex}
-  body.standby .qr-section{display:none}
-  body.standby .standby{display:flex}
+/* ── tokens ──────────────────────────────────────────── */
+:root{
+  --bg:#f5fdf7;--surface:#ffffff;--text:#08200f;--sub:#4a7c5e;
+  --accent:#16a34a;--accent-hi:#22c55e;--accent-dim:#dcfce7;
+  --border:#c4e8d0;--shadow:0 2px 8px rgba(0,0,0,.06),0 8px 32px rgba(0,0,0,.07);
+  --r:18px;
+}
+@media(prefers-color-scheme:dark){
+  :root{
+    --bg:#060e09;--surface:#0f1a12;--text:#e2f5e8;--sub:#6bbf89;
+    --accent:#22c55e;--accent-hi:#4ade80;--accent-dim:#14532d;
+    --border:#1c3322;--shadow:0 2px 8px rgba(0,0,0,.3),0 8px 40px rgba(0,0,0,.5);
+  }
+}
+:root[data-theme="light"]{
+  --bg:#f5fdf7;--surface:#ffffff;--text:#08200f;--sub:#4a7c5e;
+  --accent:#16a34a;--accent-hi:#22c55e;--accent-dim:#dcfce7;
+  --border:#c4e8d0;--shadow:0 2px 8px rgba(0,0,0,.06),0 8px 32px rgba(0,0,0,.07);
+}
+:root[data-theme="dark"]{
+  --bg:#060e09;--surface:#0f1a12;--text:#e2f5e8;--sub:#6bbf89;
+  --accent:#22c55e;--accent-hi:#4ade80;--accent-dim:#14532d;
+  --border:#1c3322;--shadow:0 2px 8px rgba(0,0,0,.3),0 8px 40px rgba(0,0,0,.5);
+}
+/* ── reset ───────────────────────────────────────────── */
+*{box-sizing:border-box;margin:0;padding:0}
+body{
+  background:var(--bg);color:var(--text);
+  font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;
+  min-height:100dvh;display:flex;align-items:center;justify-content:center;
+  padding:1.25rem;
+}
+/* ── card ─────────────────────────────────────────────── */
+.card{
+  background:var(--surface);border:1px solid var(--border);
+  border-radius:var(--r);box-shadow:var(--shadow);
+  width:100%;max-width:360px;padding:2rem 1.75rem 1.75rem;
+  display:flex;flex-direction:column;align-items:center;gap:1.25rem;
+}
+/* ── logo ─────────────────────────────────────────────── */
+.logo{display:flex;align-items:center;gap:.6rem}
+.logo-icon{width:36px;height:36px;background:var(--accent);border-radius:10px;
+  display:flex;align-items:center;justify-content:center;flex-shrink:0}
+.logo-icon svg{width:22px;height:22px;fill:#fff}
+.logo-text{font-size:.95rem;font-weight:700;letter-spacing:-.01em;color:var(--text)}
+.logo-text span{color:var(--accent)}
+/* ── QR section ───────────────────────────────────────── */
+.qr-section{width:100%;display:flex;flex-direction:column;align-items:center;gap:1rem}
+/* ring container */
+.ring-wrap{position:relative;width:240px;height:240px;flex-shrink:0}
+.ring-svg{position:absolute;inset:0;width:100%;height:100%;
+  transform:rotate(-90deg);pointer-events:none;overflow:visible}
+.ring-track{fill:none;stroke:var(--border);stroke-width:3}
+.ring-bar{fill:none;stroke:var(--accent-hi);stroke-width:3;stroke-linecap:round;
+  stroke-dasharray:${RING_C};stroke-dashoffset:0;
+  transition:stroke-dashoffset .6s linear,opacity .3s}
+.ring-bar.hidden{opacity:0}
+/* QR image frame */
+.qr-frame{
+  position:absolute;inset:12px;border-radius:10px;overflow:hidden;
+  background:#fff;display:flex;align-items:center;justify-content:center;
+}
+.qr-frame img{width:100%;height:100%;object-fit:contain;display:block;
+  transition:opacity .2s}
+.qr-frame.loading img{opacity:0}
+.spin-overlay{
+  position:absolute;inset:0;display:flex;align-items:center;justify-content:center;
+  background:#fff;border-radius:10px;opacity:0;transition:opacity .2s;
+  pointer-events:none;
+}
+.qr-frame.loading .spin-overlay{opacity:1}
+.spin-svg{width:32px;height:32px;stroke:var(--accent);fill:none;stroke-width:2.5;
+  stroke-linecap:round;animation:spin 1s linear infinite}
+@keyframes spin{to{transform:rotate(360deg)}}
+/* status row */
+.status-row{display:flex;align-items:center;gap:.45rem;
+  font-size:.78rem;color:var(--sub);letter-spacing:.02em;text-transform:uppercase}
+.dot{width:7px;height:7px;border-radius:50%;background:var(--accent);
+  animation:pdot 2s ease-in-out infinite;flex-shrink:0}
+@keyframes pdot{0%,100%{opacity:1;transform:scale(1)}50%{opacity:.35;transform:scale(.75)}}
+/* instructions */
+.instructions{font-size:.82rem;color:var(--sub);text-align:center;line-height:1.6;max-width:280px}
+.instructions strong{color:var(--text);font-weight:600}
+/* expiry */
+.expiry{font-size:.75rem;color:var(--sub);text-align:center}
+/* ── pairing code ────────────────────────────────────── */
+.pairing{width:100%;display:none;flex-direction:column;align-items:center;gap:.4rem}
+.pairing-label{font-size:.7rem;color:var(--sub);letter-spacing:.08em;text-transform:uppercase}
+.pairing-code{
+  font-family:'SF Mono','Cascadia Code','Fira Code',Consolas,monospace;
+  font-size:2rem;font-weight:700;letter-spacing:.12em;color:var(--text);
+  line-height:1;
+}
+.pairing-sep{color:var(--border);margin:0 .05em}
+.pairing.visible{display:flex}
+/* ── connected ───────────────────────────────────────── */
+.success{display:none;flex-direction:column;align-items:center;gap:1rem;text-align:center}
+.check-ring{
+  width:72px;height:72px;border-radius:50%;background:var(--accent-dim);
+  display:flex;align-items:center;justify-content:center;
+  animation:pop .45s cubic-bezier(.175,.885,.32,1.3) both;
+}
+@keyframes pop{from{transform:scale(.2);opacity:0}to{transform:scale(1);opacity:1}}
+.check-ring svg{width:36px;height:36px;stroke:var(--accent);stroke-width:3;fill:none;
+  stroke-linecap:round;stroke-linejoin:round}
+.success h2{font-size:1.2rem;font-weight:700}
+.success p{font-size:.875rem;color:var(--sub)}
+/* ── standby ─────────────────────────────────────────── */
+.standby{display:none;flex-direction:column;align-items:center;gap:1rem;text-align:center}
+.standby-orb{
+  width:68px;height:68px;border-radius:50%;background:var(--accent-dim);
+  display:flex;align-items:center;justify-content:center;
+  animation:sb-pulse 3s ease-in-out infinite;
+}
+@keyframes sb-pulse{0%,100%{box-shadow:0 0 0 0 rgba(34,197,94,.3)}50%{box-shadow:0 0 0 12px rgba(34,197,94,0)}}
+.standby-orb svg{width:32px;height:32px;fill:var(--accent)}
+.standby h2{font-size:1.1rem;font-weight:700}
+.standby p{font-size:.85rem;color:var(--sub);line-height:1.6;max-width:270px}
+/* ── expired ─────────────────────────────────────────── */
+.expired{display:none;flex-direction:column;align-items:center;gap:1rem;text-align:center}
+.expired-orb{
+  width:68px;height:68px;border-radius:50%;
+  background:rgba(239,68,68,.1);
+  display:flex;align-items:center;justify-content:center;
+}
+.expired-orb svg{width:32px;height:32px;stroke:#ef4444;fill:none;stroke-width:2;stroke-linecap:round}
+.expired h2{font-size:1.1rem;font-weight:700}
+.expired p{font-size:.85rem;color:var(--sub);line-height:1.6;max-width:270px}
+/* ── show/hide ───────────────────────────────────────── */
+body.done .qr-section,.body\\.done .pairing-section{display:none}
+body.done .success{display:flex}
+body.standby .qr-section{display:none}
+body.standby .standby{display:flex}
+body.expired .qr-section,.body\\.expired .pairing{display:none}
+body.expired .expired{display:flex}
+body.done .pairing,body.standby .pairing,body.expired .pairing{display:none!important}
 </style>
 </head>
 <body>
 <div class="card">
-  <div class="logo"><svg viewBox="0 0 32 32"><path d="M16 2C8.27 2 2 8.27 2 16c0 2.47.65 4.79 1.79 6.8L2 30l7.4-1.77A13.93 13.93 0 0016 30c7.73 0 14-6.27 14-14S23.73 2 16 2zm7.58 19.42c-.32.9-1.87 1.72-2.56 1.8-.65.08-1.47.11-2.37-.15-.54-.16-1.24-.38-2.12-.74-3.73-1.6-6.16-5.36-6.35-5.61-.18-.24-1.5-2-.1-3.76a2.02 2.02 0 011.48-.67c.18 0 .35 0 .5.01.16.01.38-.06.6.45l.83 2.03c.08.18.13.4.02.64-.1.24-.16.38-.32.58-.16.2-.34.44-.48.6-.16.18-.33.38-.14.74.19.36.85 1.4 1.83 2.27 1.26 1.12 2.32 1.47 2.65 1.63.33.16.52.13.71-.08.2-.21.84-.98 1.06-1.32.22-.33.44-.27.74-.16.3.11 1.9.9 2.23 1.06.33.16.55.24.63.37.08.14.08.8-.24 1.7z"/></svg></div>
 
-  <div class="qr-section">
-    <h1>Conectar WhatsApp</h1>
-    <p class="sub">Abra o WhatsApp no celular, toque em <strong>Dispositivos conectados</strong> e escaneie o código.</p>
-    <div class="qr-wrap loading" id="qrWrap">
-      <img id="qrImg" src="" alt="QR Code"/>
-      <div class="spinner"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="10"/><path d="M12 2a10 10 0 010 20"/></svg></div>
+  <!-- Logo -->
+  <div class="logo">
+    <div class="logo-icon">
+      <svg viewBox="0 0 32 32"><path d="M16 2C8.27 2 2 8.27 2 16c0 2.47.65 4.79 1.79 6.8L2 30l7.4-1.77A13.93 13.93 0 0016 30c7.73 0 14-6.27 14-14S23.73 2 16 2zm7.58 19.42c-.32.9-1.87 1.72-2.56 1.8-.65.08-1.47.11-2.37-.15-.54-.16-1.24-.38-2.12-.74-3.73-1.6-6.16-5.36-6.35-5.61-.18-.24-1.5-2-.1-3.76a2.02 2.02 0 011.48-.67c.18 0 .35 0 .5.01.16.01.38-.06.6.45l.83 2.03c.08.18.13.4.02.64-.1.24-.16.38-.32.58-.16.2-.34.44-.48.6-.16.18-.33.38-.14.74.19.36.85 1.4 1.83 2.27 1.26 1.12 2.32 1.47 2.65 1.63.33.16.52.13.71-.08.2-.21.84-.98 1.06-1.32.22-.33.44-.27.74-.16.3.11 1.9.9 2.23 1.06.33.16.55.24.63.37.08.14.08.8-.24 1.7z"/></svg>
     </div>
-    <div class="status"><span class="dot"></span> Aguardando escaneamento…</div>
-    <div class="timer" id="timer"></div>
+    <span class="logo-text">Evolution<span>API</span></span>
   </div>
 
+  <!-- QR section -->
+  <div class="qr-section">
+    <div class="status-row">
+      <span class="dot"></span>
+      Aguardando escaneamento
+    </div>
+
+    <div class="ring-wrap">
+      <!-- progress ring around QR -->
+      <svg class="ring-svg" viewBox="0 0 240 240">
+        <circle class="ring-track" cx="120" cy="120" r="${RING_R}"/>
+        <circle class="ring-bar hidden" id="ringBar" cx="120" cy="120" r="${RING_R}"/>
+      </svg>
+      <!-- QR frame -->
+      <div class="qr-frame loading" id="qrWrap">
+        <img id="qrImg" src="" alt="QR Code"/>
+        <div class="spin-overlay">
+          <svg class="spin-svg" viewBox="0 0 24 24">
+            <circle cx="12" cy="12" r="10" stroke-dasharray="32 10"/>
+          </svg>
+        </div>
+      </div>
+    </div>
+
+    <p class="instructions">
+      Abra o WhatsApp, toque em <strong>Dispositivos conectados</strong> e escaneie o código acima.
+    </p>
+    <div class="expiry" id="expiry"></div>
+  </div>
+
+  <!-- Pairing code (shown alongside QR when available) -->
+  <div class="pairing" id="pairingSection">
+    <div class="pairing-label">Ou use o código de emparelhamento</div>
+    <div class="pairing-code" id="pairingCode">
+      <span id="p1"></span><span class="pairing-sep">–</span><span id="p2"></span>
+    </div>
+  </div>
+
+  <!-- Connected -->
   <div class="success">
-    <div class="check"><svg viewBox="0 0 24 24"><polyline points="20 6 9 17 4 12"/></svg></div>
+    <div class="check-ring">
+      <svg viewBox="0 0 24 24"><polyline points="20 6 9 17 4 12"/></svg>
+    </div>
     <h2>Conectado!</h2>
-    <p>WhatsApp conectado com sucesso. Esta janela pode ser fechada.</p>
+    <p>WhatsApp conectado com sucesso.<br>Esta janela pode ser fechada.</p>
   </div>
 
+  <!-- Standby -->
   <div class="standby">
-    <div class="standby-icon">🟢</div>
+    <div class="standby-orb">
+      <svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.93 4.93l1.41 1.41M17.66 17.66l1.41 1.41M2 12h2M20 12h2M4.93 19.07l1.41-1.41M17.66 6.34l1.41-1.41"/><circle cx="12" cy="12" r="8" stroke-dasharray="3 2" fill="none"/></svg>
+    </div>
     <h2>WhatsApp Conectado</h2>
-    <p>A instância está ativa. Este link exibirá o QR Code automaticamente quando ela precisar reconectar.</p>
-    <div class="timer" id="standby-timer"></div>
+    <p>Esta instância está ativa. Quando precisar reconectar, o QR Code aparecerá aqui automaticamente.</p>
+    <div class="expiry" id="standby-expiry"></div>
   </div>
 
+  <!-- Expired -->
   <div class="expired">
-    <div class="expired-icon">⏱</div>
+    <div class="expired-orb">
+      <svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>
+    </div>
     <h2>Link expirado</h2>
-    <p>O tempo de validade deste link chegou ao fim.</p>
-    <p style="margin-top:.25rem">Para reconectar, acesse o painel e gere um novo link de QR Code.</p>
+    <p>O tempo de validade deste link chegou ao fim.<br>Acesse o painel para gerar um novo link.</p>
   </div>
+
 </div>
 <script>
 (function(){
   const token = location.pathname.split('/').pop();
+  const BASE_URL = ${JSON.stringify(serverUrl)};
+  const QR_LIFETIME = 20000; // ms — estimated Baileys QR validity
+  const RING_C = ${RING_C};
+
   let expiresAt = null;
-  let timerInterval = null;
-  /** True once the page has seen status 'waiting' at least once — distinguishes
-   *  "already connected when link was opened" from "just connected after scan". */
+  let tickInterval = null;
   let seenWaiting = false;
+  let qrLastChanged = 0;
+  let lastQrSrc = '';
+
+  function base(){
+    return BASE_URL || (location.origin + (location.pathname.split('/qrcode/')[0] || ''));
+  }
 
   function formatTime(ms){
     const m=Math.floor(ms/60000), s=Math.floor((ms%60000)/1000);
-    return m>0 ? m+'m '+s+'s' : s+'s';
+    return m>0 ? m+'m '+('0'+s).slice(-2)+'s' : s+'s';
   }
 
-  function updateTimer(){
-    if(!expiresAt) return;
-    const diff = expiresAt - Date.now();
-    const remaining = diff > 0 ? 'Link expira em '+formatTime(diff) : '';
-    const qrEl = document.getElementById('timer');
-    const sbEl = document.getElementById('standby-timer');
-    if(qrEl) qrEl.textContent = remaining;
-    if(sbEl) sbEl.textContent = remaining;
+  function setExpiry(text){
+    ['expiry','standby-expiry'].forEach(id=>{
+      const el=document.getElementById(id);
+      if(el) el.textContent=text;
+    });
   }
 
-  const BASE_URL = ${JSON.stringify(serverUrl)};
+  function updateRing(){
+    if(!qrLastChanged) return;
+    const elapsed = Date.now()-qrLastChanged;
+    const progress = Math.max(0, 1-elapsed/QR_LIFETIME);
+    const bar = document.getElementById('ringBar');
+    if(!bar) return;
+    bar.style.strokeDashoffset = (RING_C*(1-progress)).toFixed(1);
+    // colour shift: green → amber as it ages
+    if(progress < 0.2){
+      bar.style.stroke='#f97316';
+    } else if(progress < 0.4){
+      bar.style.stroke='#eab308';
+    } else {
+      bar.style.stroke='';
+    }
+  }
+
+  function tick(){
+    // link expiry countdown
+    if(expiresAt){
+      const diff=expiresAt-Date.now();
+      setExpiry(diff>0 ? 'Link expira em '+formatTime(diff) : '');
+    }
+    // ring progress
+    updateRing();
+  }
+
+  function setPairingCode(code){
+    const sec=document.getElementById('pairingSection');
+    if(!code||!sec){if(sec)sec.classList.remove('visible');return;}
+    document.getElementById('p1').textContent=code.slice(0,4);
+    document.getElementById('p2').textContent=code.slice(4,8);
+    sec.classList.add('visible');
+  }
 
   async function poll(){
     try{
-      const base = BASE_URL || (location.origin + (location.pathname.split('/qrcode/')[0] || ''));
-      const r = await fetch(base+'/qrcode/'+token+'/data');
-      const d = await r.json();
+      const r=await fetch(base()+'/qrcode/'+token+'/data');
+      const d=await r.json();
 
       if(d.status==='expired'){
-        clearInterval(timerInterval);
-        document.body.className = 'expired';
+        clearInterval(tickInterval);
+        document.body.className='expired';
         return;
       }
 
-      if(d.expiresAt) expiresAt = d.expiresAt;
+      if(d.expiresAt) expiresAt=d.expiresAt;
 
       if(d.status==='connected'){
         if(seenWaiting){
-          // Was waiting for a scan and now it's connected — success!
-          clearInterval(timerInterval);
-          document.body.className = 'done';
+          clearInterval(tickInterval);
+          document.body.className='done';
           return;
         }
-        // Connected before this page ever showed a QR — standby mode.
-        document.body.className = 'standby';
-        setTimeout(poll, 7000);
+        document.body.className='standby';
+        setTimeout(poll,7000);
         return;
       }
 
       // status === 'waiting'
-      seenWaiting = true;
-      document.body.className = '';  // back to QR view (in case we were in standby)
-      const wrap = document.getElementById('qrWrap');
-      const img  = document.getElementById('qrImg');
+      seenWaiting=true;
+      document.body.className='';
+
+      const wrap=document.getElementById('qrWrap');
+      const img=document.getElementById('qrImg');
+      const bar=document.getElementById('ringBar');
+
       if(d.qrCode){
-        img.src = d.qrCode;
+        if(d.qrCode!==lastQrSrc){
+          // new QR — flash + reset ring
+          lastQrSrc=d.qrCode;
+          qrLastChanged=Date.now();
+          img.style.opacity='.3';
+          img.src=d.qrCode;
+          img.onload=()=>{ img.style.opacity=''; };
+          if(bar){ bar.classList.remove('hidden'); bar.style.strokeDashoffset='0'; }
+        }
         wrap.classList.remove('loading');
       } else {
         wrap.classList.add('loading');
+        if(bar) bar.classList.add('hidden');
       }
+
+      setPairingCode(d.pairingCode||null);
+
     }catch(e){
       console.warn('poll error',e);
     }
-    setTimeout(poll, 7000);
+    setTimeout(poll,7000);
   }
 
   poll();
-  timerInterval = setInterval(updateTimer, 1000);
+  tickInterval=setInterval(tick,500);
 })();
 </script>
 </body>
