@@ -216,10 +216,8 @@ router.post('/instance/qrcode/publicLink/:instanceName', authGuard['apikey'], (r
 
   const state = instance.connectionStatus?.state;
 
-  if (state === 'open') {
-    return res.status(HttpStatus.BAD_REQUEST).json({ error: 'Instance is already connected' });
-  }
-
+  // Only trigger a new connection when the instance is fully closed.
+  // If it's 'open' or 'connecting' we just issue the link without touching the session.
   if (state === 'close') {
     instance.connectToWhatsapp().catch(() => {});
   }
@@ -293,7 +291,8 @@ router.get('/qrcode/:token/data', (req, res) => {
   const state = instance.connectionStatus?.state;
 
   if (state === 'open') {
-    deleteQrToken(req.params.token);
+    // Don't delete the token here — the page needs to know when it eventually disconnects.
+    // The page itself decides whether 'connected' means "just scanned" or "still active".
     return res.status(HttpStatus.OK).json({ status: 'connected', instanceName: entry.instanceName });
   }
 
@@ -352,11 +351,18 @@ function buildQrPage(serverUrl = ''): string {
   .expired-icon{font-size:2.5rem}
   .expired h2{font-size:1.2rem;font-weight:700;color:var(--text)}
   .expired p{font-size:.875rem;color:var(--sub);max-width:280px}
+  /* standby */
+  .standby{display:none;flex-direction:column;align-items:center;gap:.75rem;text-align:center}
+  .standby-icon{font-size:2.5rem}
+  .standby h2{font-size:1.2rem;font-weight:700;color:var(--text)}
+  .standby p{font-size:.875rem;color:var(--sub);max-width:300px}
   /* main hide/show */
   body.done .qr-section{display:none}
   body.done .success{display:flex}
   body.expired .qr-section{display:none}
   body.expired .expired{display:flex}
+  body.standby .qr-section{display:none}
+  body.standby .standby{display:flex}
 </style>
 </head>
 <body>
@@ -380,11 +386,18 @@ function buildQrPage(serverUrl = ''): string {
     <p>WhatsApp conectado com sucesso. Esta janela pode ser fechada.</p>
   </div>
 
+  <div class="standby">
+    <div class="standby-icon">🟢</div>
+    <h2>WhatsApp Conectado</h2>
+    <p>A instância está ativa. Este link exibirá o QR Code automaticamente quando ela precisar reconectar.</p>
+    <div class="timer" id="standby-timer"></div>
+  </div>
+
   <div class="expired">
     <div class="expired-icon">⏱</div>
     <h2>Link expirado</h2>
     <p>O tempo de validade deste link chegou ao fim.</p>
-    <p style="margin-top:.25rem">Para conectar novamente, acesse o painel e gere um novo link de QR Code.</p>
+    <p style="margin-top:.25rem">Para reconectar, acesse o painel e gere um novo link de QR Code.</p>
   </div>
 </div>
 <script>
@@ -392,6 +405,9 @@ function buildQrPage(serverUrl = ''): string {
   const token = location.pathname.split('/').pop();
   let expiresAt = null;
   let timerInterval = null;
+  /** True once the page has seen status 'waiting' at least once — distinguishes
+   *  "already connected when link was opened" from "just connected after scan". */
+  let seenWaiting = false;
 
   function formatTime(ms){
     const m=Math.floor(ms/60000), s=Math.floor((ms%60000)/1000);
@@ -401,9 +417,11 @@ function buildQrPage(serverUrl = ''): string {
   function updateTimer(){
     if(!expiresAt) return;
     const diff = expiresAt - Date.now();
-    const el = document.getElementById('timer');
-    if(diff<=0){ el.textContent=''; return; }
-    el.textContent = 'Link expira em '+formatTime(diff);
+    const remaining = diff > 0 ? 'Link expira em '+formatTime(diff) : '';
+    const qrEl = document.getElementById('timer');
+    const sbEl = document.getElementById('standby-timer');
+    if(qrEl) qrEl.textContent = remaining;
+    if(sbEl) sbEl.textContent = remaining;
   }
 
   const BASE_URL = ${JSON.stringify(serverUrl)};
@@ -414,19 +432,30 @@ function buildQrPage(serverUrl = ''): string {
       const r = await fetch(base+'/qrcode/'+token+'/data');
       const d = await r.json();
 
-      if(d.status==='connected'){
-        clearInterval(timerInterval);
-        document.body.classList.add('done');
-        return;
-      }
       if(d.status==='expired'){
         clearInterval(timerInterval);
-        document.body.classList.add('expired');
+        document.body.className = 'expired';
         return;
       }
 
       if(d.expiresAt) expiresAt = d.expiresAt;
 
+      if(d.status==='connected'){
+        if(seenWaiting){
+          // Was waiting for a scan and now it's connected — success!
+          clearInterval(timerInterval);
+          document.body.className = 'done';
+          return;
+        }
+        // Connected before this page ever showed a QR — standby mode.
+        document.body.className = 'standby';
+        setTimeout(poll, 7000);
+        return;
+      }
+
+      // status === 'waiting'
+      seenWaiting = true;
+      document.body.className = '';  // back to QR view (in case we were in standby)
       const wrap = document.getElementById('qrWrap');
       const img  = document.getElementById('qrImg');
       if(d.qrCode){
@@ -438,7 +467,7 @@ function buildQrPage(serverUrl = ''): string {
     }catch(e){
       console.warn('poll error',e);
     }
-    setTimeout(poll, 15000);
+    setTimeout(poll, 7000);
   }
 
   poll();
