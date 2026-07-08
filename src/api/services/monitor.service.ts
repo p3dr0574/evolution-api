@@ -447,7 +447,8 @@ export class WAMonitoringService {
         number: instance.number,
         businessId: instance.businessId,
         ownerJid: instance.ownerJid,
-        connectionStatus: instance.connectionStatus as any, // Pass connection status
+        profileName: instance.profileName,
+        connectionStatus: instance.connectionStatus as any,
       });
     });
   }
@@ -474,7 +475,9 @@ export class WAMonitoringService {
         integration: instance.integration,
         token: instance.token,
         businessId: instance.businessId,
-        connectionStatus: instance.connectionStatus as any, // Pass connection status
+        ownerJid: instance.ownerJid,
+        profileName: instance.profileName,
+        connectionStatus: instance.connectionStatus as any,
       });
     });
   }
