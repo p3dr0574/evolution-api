@@ -21,6 +21,7 @@ import ChatwootClient, {
 import { request as chatwootRequest } from '@figuro/chatwoot-sdk/dist/core/request';
 import { Chatwoot as ChatwootModel, Contact as ContactModel, Message as MessageModel } from '@prisma/client';
 import i18next from '@utils/i18n';
+import { createQrToken, getActiveToken } from '@utils/qrPublicTokens';
 import { sendTelemetry } from '@utils/sendTelemetry';
 import axios from 'axios';
 import { WAMessageContent, WAMessageKey } from 'baileys';
@@ -386,8 +387,9 @@ export class ChatwootService {
       });
 
       return contact;
-    } catch {
-      return null;
+    } catch (err: any) {
+      const status = err?.response?.status ?? err?.status ?? 0;
+      return { __updateError: true, status } as any;
     }
   }
 
@@ -443,14 +445,20 @@ export class ChatwootService {
           identifier: resolvedJid,
         });
 
-        if (updateResult === null) {
-          // Conflict: real phone already exists on another contact — merge them.
-          const targetContact = await this.findContact(instance, realPhone);
-          if (targetContact && targetContact.id !== existingLidContact.id) {
-            this.logger.verbose(
-              `Merging @lid contact (${existingLidContact.id}) into real contact (${targetContact.id})`,
-            );
-            await this.mergeContacts(targetContact.id, existingLidContact.id);
+        if ((updateResult as any)?.__updateError) {
+          const httpStatus = (updateResult as any).status;
+          if (httpStatus === 422) {
+            // Phone conflict: real phone already exists on another contact — merge them.
+            const targetContact = await this.findContact(instance, realPhone);
+            if (targetContact && targetContact.id !== existingLidContact.id) {
+              this.logger.verbose(
+                `Merging @lid contact (${existingLidContact.id}) into real contact (${targetContact.id})`,
+              );
+              await this.mergeContacts(targetContact.id, existingLidContact.id);
+            }
+          } else {
+            // Any other error (5xx, network, auth) — let the retry logic handle it.
+            throw new Error(`updateContact failed with HTTP ${httpStatus}`);
           }
         }
       } catch (error) {
@@ -474,15 +482,26 @@ export class ChatwootService {
       return null;
     }
 
-    // Search by q= (matches identifier, phone, email, name)
-    const result = await client.contacts.search({
-      accountId: this.provider.accountId,
-      q: identifier,
-    });
+    // Chatwoot search paginates at 15 items. Loop until found or exhausted (cap at 10 pages).
+    const PAGE_SIZE = 15;
+    const MAX_PAGES = 10;
 
-    const payload: any[] = result?.payload ?? [];
-    // Exact match on identifier to avoid false positives from partial q= matches.
-    return payload.find((c: any) => c.identifier === identifier) ?? null;
+    for (let page = 1; page <= MAX_PAGES; page++) {
+      const result = await (client.contacts.search as any)({
+        accountId: this.provider.accountId,
+        q: identifier,
+        page,
+      });
+
+      const payload: any[] = result?.payload ?? [];
+      const found = payload.find((c: any) => c.identifier === identifier);
+      if (found) return found;
+
+      // If fewer results than a full page, there are no more pages.
+      if (payload.length < PAGE_SIZE) return null;
+    }
+
+    return null;
   }
 
   public async findContact(instance: InstanceDto, phoneNumber: string) {
@@ -669,7 +688,7 @@ export class ChatwootService {
             phone_number: `+${phoneNumber.split('@')[0]}`,
           });
 
-          if (updateContact === null) {
+          if ((updateContact as any)?.__updateError && (updateContact as any).status === 422) {
             const baseContact = await this.findContact(instance, phoneNumber.split('@')[0]);
             if (baseContact) {
               await this.mergeContacts(baseContact.id, contact.id);
@@ -945,7 +964,6 @@ export class ChatwootService {
       this.logger.warn(
         `[${instance.instanceName}] Inbox não encontrado por ${count} tentativas consecutivas — desativando integração Chatwoot.`,
       );
-      this.inboxFailureCount.delete(instance.instanceName);
       try {
         await this.prismaRepository.chatwoot.update({
           where: { instanceId: instance.instanceId },
@@ -953,6 +971,9 @@ export class ChatwootService {
         });
         const waInstance = this.waMonitor.waInstances[instance.instanceName];
         if (waInstance) waInstance.localChatwoot.enabled = false;
+        // Only clear the counter after the DB update succeeds; if it fails the
+        // counter stays at 3 and the next failure retries the disable immediately.
+        this.inboxFailureCount.delete(instance.instanceName);
       } catch (err) {
         this.logger.error(`Falha ao desativar integração Chatwoot para ${instance.instanceName}: ${err?.message}`);
       }
@@ -2538,35 +2559,21 @@ export class ChatwootService {
         if (body.statusCode === 500) {
           const erroQRcode = `🚨 ${i18next.t('qrlimitreached')}`;
           return await this.createBotMessage(instance, erroQRcode, 'incoming');
-        } else {
-          const fileData = Buffer.from(body?.qrcode.base64.replace('data:image/png;base64,', ''), 'base64');
-
-          const fileStream = new Readable();
-          fileStream._read = () => {};
-          fileStream.push(fileData);
-          fileStream.push(null);
-
-          await this.createBotQr(
-            instance,
-            i18next.t('qrgeneratedsuccesfully'),
-            'incoming',
-            fileStream,
-            `${instance.instanceName}.png`,
-          );
-
-          let msgQrCode = `⚡️${i18next.t('qrgeneratedsuccesfully')}\n\n${i18next.t('scanqr')}`;
-
-          if (body?.qrcode?.pairingCode) {
-            msgQrCode =
-              msgQrCode +
-              `\n\n*Pairing Code:* ${body.qrcode.pairingCode.substring(0, 4)}-${body.qrcode.pairingCode.substring(
-                4,
-                8,
-              )}`;
-          }
-
-          await this.createBotMessage(instance, msgQrCode, 'incoming');
         }
+
+        const waInstance = this.waMonitor.waInstances[instance.instanceName];
+        const isFirstQr = (waInstance?.qrCode?.count ?? 0) <= 1;
+
+        if (isFirstQr) {
+          const serverUrl = this.configService.get<HttpServer>('SERVER').URL ?? '';
+          // Reuse existing active token or create a new one (15 min TTL)
+          let token = getActiveToken(instance.instanceName);
+          if (!token) token = createQrToken(instance.instanceName, 900);
+          const url = `${serverUrl}/qrcode/${token}`;
+          const msg = `⚡️ *QR Code gerado!*\n\n🔗 Clique no link para escanear:\n${url}\n\n_O link atualiza o QR Code automaticamente._`;
+          await this.createBotMessage(instance, msg, 'incoming');
+        }
+        // QR refreshes silently — the public page handles auto-update
       }
     } catch (error) {
       this.logger.error(error);
