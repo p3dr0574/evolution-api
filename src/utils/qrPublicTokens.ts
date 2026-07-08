@@ -1,4 +1,4 @@
-import { randomUUID } from 'crypto';
+import { createHash } from 'crypto';
 
 export interface QrTokenEntry {
   instanceName: string;
@@ -7,24 +7,23 @@ export interface QrTokenEntry {
 }
 
 const store = new Map<string, QrTokenEntry>();
-/** Tracks the single active token per instance so creating a new one revokes the old. */
-const activeByInstance = new Map<string, string>();
 
 const DEFAULT_TTL_S = 15 * 60; // 15 minutes
 
+/** Derive a stable, deterministic token from an instance name. Same instance = same URL forever. */
+export function instanceToken(instanceName: string): string {
+  return createHash('sha256').update('evo-qr:' + instanceName).digest('hex').slice(0, 24);
+}
+
 /**
- * Create a public QR token for an instance.
- * @param ttlSeconds Lifetime in seconds. 0 or omitted = no expiry.
+ * Activate (or refresh) the public QR link for an instance.
+ * The token is deterministic — the URL never changes between sessions.
+ * Pass ttlSeconds=0 for no expiry.
  */
 export function createQrToken(instanceName: string, ttlSeconds = DEFAULT_TTL_S): string {
-  // Revoke previous token for this instance if any
-  const prev = activeByInstance.get(instanceName);
-  if (prev) store.delete(prev);
-
-  const token = randomUUID();
+  const token = instanceToken(instanceName);
   const expiresAt = ttlSeconds > 0 ? Date.now() + ttlSeconds * 1000 : null;
   store.set(token, { instanceName, expiresAt });
-  activeByInstance.set(instanceName, token);
   return token;
 }
 
@@ -33,34 +32,28 @@ export function resolveQrToken(token: string): QrTokenEntry | null {
   if (!entry) return null;
   if (entry.expiresAt !== null && Date.now() > entry.expiresAt) {
     store.delete(token);
-    activeByInstance.delete(entry.instanceName);
     return null;
   }
   return entry;
 }
 
 export function deleteQrToken(token: string): void {
-  const entry = store.get(token);
-  if (entry) activeByInstance.delete(entry.instanceName);
   store.delete(token);
 }
 
 export function revokeByInstance(instanceName: string): boolean {
-  const token = activeByInstance.get(instanceName);
-  if (!token) return false;
+  const token = instanceToken(instanceName);
+  if (!store.has(token)) return false;
   store.delete(token);
-  activeByInstance.delete(instanceName);
   return true;
 }
 
 export function getActiveToken(instanceName: string): string | null {
-  const token = activeByInstance.get(instanceName);
-  if (!token) return null;
+  const token = instanceToken(instanceName);
   const entry = store.get(token);
-  if (!entry) { activeByInstance.delete(instanceName); return null; }
+  if (!entry) return null;
   if (entry.expiresAt !== null && Date.now() > entry.expiresAt) {
     store.delete(token);
-    activeByInstance.delete(instanceName);
     return null;
   }
   return token;
@@ -71,7 +64,6 @@ setInterval(() => {
   const now = Date.now();
   for (const [key, val] of store) {
     if (val.expiresAt !== null && now > val.expiresAt) {
-      activeByInstance.delete(val.instanceName);
       store.delete(key);
     }
   }

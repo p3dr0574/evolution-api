@@ -289,11 +289,13 @@ router.get('/qrcode/:token/data', (req, res) => {
   }
 
   const state = instance.connectionStatus?.state;
+  const profileName = (instance as any).profileName ?? null;
+  const phoneNumber = instance.wuid ? instance.wuid.split('@')[0] : null;
 
   if (state === 'open') {
     // Don't delete the token here — the page needs to know when it eventually disconnects.
     // The page itself decides whether 'connected' means "just scanned" or "still active".
-    return res.status(HttpStatus.OK).json({ status: 'connected', instanceName: entry.instanceName });
+    return res.status(HttpStatus.OK).json({ status: 'connected', instanceName: entry.instanceName, profileName, phoneNumber });
   }
 
   const qr = instance.qrCode;
@@ -303,6 +305,8 @@ router.get('/qrcode/:token/data', (req, res) => {
     qrCode: qr?.base64 ?? null,
     pairingCode: qr?.pairingCode ?? null,
     expiresAt: entry.expiresAt,
+    profileName,
+    phoneNumber,
   });
 });
 
@@ -391,6 +395,21 @@ body{
 .pairing-code .sep{color:#d4d4d8;letter-spacing:0}
 .pairing.on{display:flex}
 .link-expiry{font-size:.72rem;color:#a1a1aa;text-align:center}
+/* account chip */
+.account-chip{
+  display:none;align-items:center;gap:.55rem;
+  background:#f4f4f5;border-radius:99px;padding:.35rem .75rem .35rem .45rem;
+  margin-bottom:.25rem;
+}
+.account-chip.visible{display:flex}
+.account-avatar{
+  width:26px;height:26px;border-radius:50%;background:#25d366;
+  display:flex;align-items:center;justify-content:center;
+  font-size:.7rem;font-weight:700;color:#fff;flex-shrink:0;text-transform:uppercase;
+}
+.account-details{display:flex;flex-direction:column;gap:.05rem;line-height:1.2}
+.account-name{font-size:.8rem;font-weight:600;color:#18181b}
+.account-phone{font-size:.72rem;color:#71717a}
 .s-done,.s-standby{
   display:none;flex-direction:column;align-items:center;gap:.85rem;
   text-align:center;padding:.5rem 0;
@@ -444,7 +463,14 @@ body.expired .s-expired{display:flex}
     <span class="logo-name">Evolution<em>API</em></span>
   </div>
   <div class="s-qr">
-    <h2 class="qr-title">Conectar WhatsApp</h2>
+    <h2 class="qr-title" id="qrTitle">Conectar WhatsApp</h2>
+    <div class="account-chip" id="accountChip">
+      <div class="account-avatar" id="accountAvatar"></div>
+      <div class="account-details">
+        <span class="account-name" id="accountName"></span>
+        <span class="account-phone" id="accountPhone"></span>
+      </div>
+    </div>
     <p class="qr-sub">Abra o WhatsApp, toque em <strong>Dispositivos conectados</strong> e escaneie o código.</p>
     <div class="qr-box loading" id="qrWrap">
       <img id="qrImg" src="" alt="QR Code"/>
@@ -462,6 +488,13 @@ body.expired .s-expired{display:flex}
       <svg viewBox="0 0 24 24"><polyline points="20 6 9 17 4 12"/></svg>
     </div>
     <h2>WhatsApp conectado!</h2>
+    <div class="account-chip" id="doneChip">
+      <div class="account-avatar" id="doneAvatar"></div>
+      <div class="account-details">
+        <span class="account-name" id="doneName"></span>
+        <span class="account-phone" id="donePhone"></span>
+      </div>
+    </div>
     <p>Conexão estabelecida com sucesso.<br>Esta aba pode ser fechada.</p>
   </div>
   <div class="s-standby">
@@ -469,6 +502,13 @@ body.expired .s-expired{display:flex}
       <svg viewBox="0 0 24 24"><polyline points="20 6 9 17 4 12"/></svg>
     </div>
     <h2>WhatsApp já está conectado</h2>
+    <div class="account-chip" id="standbyChip">
+      <div class="account-avatar" id="standbyAvatar"></div>
+      <div class="account-details">
+        <span class="account-name" id="standbyName"></span>
+        <span class="account-phone" id="standbyPhone"></span>
+      </div>
+    </div>
     <p>Esta instância está ativa no momento. Caso a conexão caia, o QR Code aparecerá aqui automaticamente para você reconectar.</p>
     <div class="standby-badge">Monitorando conexão</div>
     <div class="link-expiry" id="standby-expiry"></div>
@@ -537,6 +577,45 @@ body.expired .s-expired{display:flex}
     sec.classList.add('on');
   }
 
+  function fmtPhone(raw){
+    if(!raw) return '';
+    // strip @lid / @s.whatsapp.net suffixes if any
+    const digits = raw.replace(/@.*/, '');
+    return '+' + digits;
+  }
+
+  function fillChip(prefix, name, phone){
+    const chip=document.getElementById(prefix+'Chip');
+    const av=document.getElementById(prefix+'Avatar');
+    const nm=document.getElementById(prefix+'Name');
+    const ph=document.getElementById(prefix+'Phone');
+    if(!chip) return;
+    if(!name && !phone){ chip.classList.remove('visible'); return; }
+    if(av) av.textContent = (name||phone||'?')[0];
+    if(nm) nm.textContent = name||'';
+    if(ph) ph.textContent = fmtPhone(phone);
+    chip.classList.add('visible');
+  }
+
+  function setAccountInfo(name, phone){
+    // QR state chip (prefix 'account')
+    const chip=document.getElementById('accountChip');
+    const av=document.getElementById('accountAvatar');
+    const nm=document.getElementById('accountName');
+    const ph=document.getElementById('accountPhone');
+    const title=document.getElementById('qrTitle');
+    if(name||phone){
+      if(av) av.textContent=(name||phone||'?')[0];
+      if(nm) nm.textContent=name||'';
+      if(ph) ph.textContent=fmtPhone(phone);
+      if(chip) chip.classList.add('visible');
+      if(title) title.textContent=name ? 'Reconectar: '+name : 'Reconectar WhatsApp';
+    }
+    // standby/done chips
+    fillChip('standby', name, phone);
+    fillChip('done', name, phone);
+  }
+
   async function poll(){
     try{
       const r=await fetch(base()+'/qrcode/'+token+'/data');
@@ -549,6 +628,8 @@ body.expired .s-expired{display:flex}
       }
 
       if(d.expiresAt) expiresAt=d.expiresAt;
+
+      if(d.profileName||d.phoneNumber) setAccountInfo(d.profileName||null, d.phoneNumber||null);
 
       if(d.status==='connected'){
         if(seenWaiting){

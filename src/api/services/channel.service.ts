@@ -62,6 +62,7 @@ export class ChannelStartupService {
     this.instance.token = instance.token;
     this.instance.businessId = instance.businessId;
     this.instance.ownerJid = instance.ownerJid;
+    if (instance.profileName) this.instance.profileName = instance.profileName;
 
     if (this.configService.get<Chatwoot>('CHATWOOT').ENABLED && this.localChatwoot?.enabled) {
       this.chatwootService.eventWhatsapp(
@@ -123,6 +124,10 @@ export class ChannelStartupService {
 
   public get token() {
     return this.instance.token;
+  }
+
+  public get profileName(): string | null {
+    return this.instance.profileName ?? null;
   }
 
   public get wuid() {

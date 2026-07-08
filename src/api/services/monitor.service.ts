@@ -378,6 +378,7 @@ export class WAMonitoringService {
       number: instanceData.number,
       businessId: instanceData.businessId,
       ownerJid: instanceData.ownerJid,
+      profileName: instanceData.profileName,
     });
 
     if (
