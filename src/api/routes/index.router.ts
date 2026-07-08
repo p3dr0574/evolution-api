@@ -313,9 +313,7 @@ router.get('/qrcode/:token', (_req, res) => {
 });
 
 function buildQrPage(serverUrl = ''): string {
-  // SVG ring: r=108, so circumference ≈ 678.6
-  const RING_R = 108;
-  const RING_C = +(2 * Math.PI * RING_R).toFixed(1);
+  const QR_LIFETIME = 20; // seconds
   return `<!DOCTYPE html>
 <html lang="pt-BR">
 <head>
@@ -323,284 +321,220 @@ function buildQrPage(serverUrl = ''): string {
 <meta name="viewport" content="width=device-width,initial-scale=1"/>
 <title>Conectar WhatsApp</title>
 <style>
-/* ── tokens ──────────────────────────────────────────── */
-:root{
-  --bg:#f5fdf7;--surface:#ffffff;--text:#08200f;--sub:#4a7c5e;
-  --accent:#16a34a;--accent-hi:#22c55e;--accent-dim:#dcfce7;
-  --border:#c4e8d0;--shadow:0 2px 8px rgba(0,0,0,.06),0 8px 32px rgba(0,0,0,.07);
-  --r:18px;
-}
-@media(prefers-color-scheme:dark){
-  :root{
-    --bg:#060e09;--surface:#0f1a12;--text:#e2f5e8;--sub:#6bbf89;
-    --accent:#22c55e;--accent-hi:#4ade80;--accent-dim:#14532d;
-    --border:#1c3322;--shadow:0 2px 8px rgba(0,0,0,.3),0 8px 40px rgba(0,0,0,.5);
-  }
-}
-:root[data-theme="light"]{
-  --bg:#f5fdf7;--surface:#ffffff;--text:#08200f;--sub:#4a7c5e;
-  --accent:#16a34a;--accent-hi:#22c55e;--accent-dim:#dcfce7;
-  --border:#c4e8d0;--shadow:0 2px 8px rgba(0,0,0,.06),0 8px 32px rgba(0,0,0,.07);
-}
-:root[data-theme="dark"]{
-  --bg:#060e09;--surface:#0f1a12;--text:#e2f5e8;--sub:#6bbf89;
-  --accent:#22c55e;--accent-hi:#4ade80;--accent-dim:#14532d;
-  --border:#1c3322;--shadow:0 2px 8px rgba(0,0,0,.3),0 8px 40px rgba(0,0,0,.5);
-}
-/* ── reset ───────────────────────────────────────────── */
 *{box-sizing:border-box;margin:0;padding:0}
 body{
-  background:var(--bg);color:var(--text);
+  background:#f4f4f5;
   font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;
-  min-height:100dvh;display:flex;align-items:center;justify-content:center;
-  padding:1.25rem;
+  min-height:100dvh;display:flex;flex-direction:column;
+  align-items:center;justify-content:center;padding:1.5rem;
 }
-/* ── card ─────────────────────────────────────────────── */
 .card{
-  background:var(--surface);border:1px solid var(--border);
-  border-radius:var(--r);box-shadow:var(--shadow);
-  width:100%;max-width:360px;padding:2rem 1.75rem 1.75rem;
-  display:flex;flex-direction:column;align-items:center;gap:1.25rem;
+  background:#fff;border-radius:20px;
+  box-shadow:0 1px 2px rgba(0,0,0,.04),0 4px 16px rgba(0,0,0,.07);
+  width:100%;max-width:380px;
+  padding:2.25rem 2rem 2rem;
+  display:flex;flex-direction:column;align-items:center;
 }
-/* ── logo ─────────────────────────────────────────────── */
-.logo{display:flex;align-items:center;gap:.6rem}
-.logo-icon{width:36px;height:36px;background:var(--accent);border-radius:10px;
-  display:flex;align-items:center;justify-content:center;flex-shrink:0}
-.logo-icon svg{width:22px;height:22px;fill:#fff}
-.logo-text{font-size:.95rem;font-weight:700;letter-spacing:-.01em;color:var(--text)}
-.logo-text span{color:var(--accent)}
-/* ── QR section ───────────────────────────────────────── */
-.qr-section{width:100%;display:flex;flex-direction:column;align-items:center;gap:1rem}
-/* ring container */
-.ring-wrap{position:relative;width:240px;height:240px;flex-shrink:0}
-.ring-svg{position:absolute;inset:0;width:100%;height:100%;
-  transform:rotate(-90deg);pointer-events:none;overflow:visible}
-.ring-track{fill:none;stroke:var(--border);stroke-width:3}
-.ring-bar{fill:none;stroke:var(--accent-hi);stroke-width:3;stroke-linecap:round;
-  stroke-dasharray:${RING_C};stroke-dashoffset:0;
-  transition:stroke-dashoffset .6s linear,opacity .3s}
-.ring-bar.hidden{opacity:0}
-/* QR image frame */
-.qr-frame{
-  position:absolute;inset:12px;border-radius:10px;overflow:hidden;
-  background:#fff;display:flex;align-items:center;justify-content:center;
+.logo{display:flex;align-items:center;gap:.55rem;margin-bottom:1.75rem}
+.logo-mark{
+  width:32px;height:32px;background:#25d366;border-radius:8px;
+  display:flex;align-items:center;justify-content:center;flex-shrink:0;
 }
-.qr-frame img{width:100%;height:100%;object-fit:contain;display:block;
-  transition:opacity .2s}
-.qr-frame.loading img{opacity:0}
-.spin-overlay{
+.logo-mark svg{width:19px;height:19px;fill:#fff}
+.logo-name{font-size:.9rem;font-weight:600;color:#18181b;letter-spacing:-.01em}
+.logo-name em{color:#25d366;font-style:normal}
+.s-qr{width:100%;display:flex;flex-direction:column;align-items:center;gap:0}
+.qr-title{font-size:1.1rem;font-weight:700;color:#18181b;margin-bottom:.3rem;text-align:center}
+.qr-sub{font-size:.82rem;color:#71717a;text-align:center;line-height:1.55;margin-bottom:1.25rem;max-width:280px}
+.qr-sub strong{color:#3f3f46;font-weight:600}
+.qr-box{
+  position:relative;width:220px;height:220px;
+  border-radius:14px;overflow:hidden;background:#fff;
+  border:1.5px solid #e4e4e7;
+  margin-bottom:1rem;
+}
+.qr-box img{
+  width:100%;height:100%;object-fit:contain;display:block;
+  transition:opacity .25s;
+}
+.qr-box.loading img{opacity:0}
+.spin-layer{
   position:absolute;inset:0;display:flex;align-items:center;justify-content:center;
-  background:#fff;border-radius:10px;opacity:0;transition:opacity .2s;
-  pointer-events:none;
+  opacity:0;transition:opacity .2s;pointer-events:none;
 }
-.qr-frame.loading .spin-overlay{opacity:1}
-.spin-svg{width:32px;height:32px;stroke:var(--accent);fill:none;stroke-width:2.5;
-  stroke-linecap:round;animation:spin 1s linear infinite}
+.qr-box.loading .spin-layer{opacity:1}
+.spin{
+  width:28px;height:28px;border-radius:50%;
+  border:2.5px solid #e4e4e7;border-top-color:#25d366;
+  animation:spin .8s linear infinite;
+}
 @keyframes spin{to{transform:rotate(360deg)}}
-/* status row */
-.status-row{display:flex;align-items:center;gap:.45rem;
-  font-size:.78rem;color:var(--sub);letter-spacing:.02em;text-transform:uppercase}
-.dot{width:7px;height:7px;border-radius:50%;background:var(--accent);
-  animation:pdot 2s ease-in-out infinite;flex-shrink:0}
-@keyframes pdot{0%,100%{opacity:1;transform:scale(1)}50%{opacity:.35;transform:scale(.75)}}
-/* instructions */
-.instructions{font-size:.82rem;color:var(--sub);text-align:center;line-height:1.6;max-width:280px}
-.instructions strong{color:var(--text);font-weight:600}
-/* expiry */
-.expiry{font-size:.75rem;color:var(--sub);text-align:center}
-/* ── pairing code ────────────────────────────────────── */
-.pairing{width:100%;display:none;flex-direction:column;align-items:center;gap:.4rem}
-.pairing-label{font-size:.7rem;color:var(--sub);letter-spacing:.08em;text-transform:uppercase}
+.prog-track{
+  width:220px;height:3px;background:#f4f4f5;border-radius:99px;
+  overflow:hidden;margin-bottom:1.1rem;
+}
+.prog-bar{
+  height:100%;width:100%;border-radius:99px;
+  background:#25d366;
+  transform-origin:left;
+  transition:background .4s;
+}
+.pairing{
+  display:none;flex-direction:column;align-items:center;gap:.3rem;
+  width:100%;margin-bottom:1rem;
+}
+.pairing-label{font-size:.7rem;color:#a1a1aa;letter-spacing:.06em;text-transform:uppercase}
 .pairing-code{
-  font-family:'SF Mono','Cascadia Code','Fira Code',Consolas,monospace;
-  font-size:2rem;font-weight:700;letter-spacing:.12em;color:var(--text);
-  line-height:1;
+  font-family:'SF Mono','Cascadia Code',Consolas,monospace;
+  font-size:1.75rem;font-weight:700;color:#18181b;letter-spacing:.1em;line-height:1;
 }
-.pairing-sep{color:var(--border);margin:0 .05em}
-.pairing.visible{display:flex}
-/* ── connected ───────────────────────────────────────── */
-.success{display:none;flex-direction:column;align-items:center;gap:1rem;text-align:center}
-.check-ring{
-  width:72px;height:72px;border-radius:50%;background:var(--accent-dim);
+.pairing-code .sep{color:#d4d4d8;letter-spacing:0}
+.pairing.on{display:flex}
+.link-expiry{font-size:.72rem;color:#a1a1aa;text-align:center}
+.s-done,.s-standby{
+  display:none;flex-direction:column;align-items:center;gap:.85rem;
+  text-align:center;padding:.5rem 0;
+}
+.icon-ok{
+  width:64px;height:64px;border-radius:50%;
+  background:#f0fdf4;
   display:flex;align-items:center;justify-content:center;
-  animation:pop .45s cubic-bezier(.175,.885,.32,1.3) both;
+  margin-bottom:.25rem;
 }
-@keyframes pop{from{transform:scale(.2);opacity:0}to{transform:scale(1);opacity:1}}
-.check-ring svg{width:36px;height:36px;stroke:var(--accent);stroke-width:3;fill:none;
+.icon-ok svg{width:30px;height:30px;stroke:#22c55e;stroke-width:2.5;fill:none;
   stroke-linecap:round;stroke-linejoin:round}
-.success h2{font-size:1.2rem;font-weight:700}
-.success p{font-size:.875rem;color:var(--sub)}
-/* ── standby ─────────────────────────────────────────── */
-.standby{display:none;flex-direction:column;align-items:center;gap:1rem;text-align:center}
-.standby-orb{
-  width:68px;height:68px;border-radius:50%;background:var(--accent-dim);
-  display:flex;align-items:center;justify-content:center;
-  animation:sb-pulse 3s ease-in-out infinite;
+.s-done h2,.s-standby h2{font-size:1.1rem;font-weight:700;color:#18181b}
+.s-done p,.s-standby p{font-size:.84rem;color:#71717a;line-height:1.6;max-width:270px}
+.standby-badge{
+  display:flex;align-items:center;gap:.4rem;
+  font-size:.75rem;color:#22c55e;font-weight:500;
 }
-@keyframes sb-pulse{0%,100%{box-shadow:0 0 0 0 rgba(34,197,94,.3)}50%{box-shadow:0 0 0 12px rgba(34,197,94,0)}}
-.standby-orb svg{width:32px;height:32px;fill:var(--accent)}
-.standby h2{font-size:1.1rem;font-weight:700}
-.standby p{font-size:.85rem;color:var(--sub);line-height:1.6;max-width:270px}
-/* ── expired ─────────────────────────────────────────── */
-.expired{display:none;flex-direction:column;align-items:center;gap:1rem;text-align:center}
-.expired-orb{
-  width:68px;height:68px;border-radius:50%;
-  background:rgba(239,68,68,.1);
-  display:flex;align-items:center;justify-content:center;
+.standby-badge::before{
+  content:'';width:7px;height:7px;border-radius:50%;background:#22c55e;
+  animation:pdot 2.5s ease-in-out infinite;flex-shrink:0;
 }
-.expired-orb svg{width:32px;height:32px;stroke:#ef4444;fill:none;stroke-width:2;stroke-linecap:round}
-.expired h2{font-size:1.1rem;font-weight:700}
-.expired p{font-size:.85rem;color:var(--sub);line-height:1.6;max-width:270px}
-/* ── show/hide ───────────────────────────────────────── */
-body.done .qr-section,.body\\.done .pairing-section{display:none}
-body.done .success{display:flex}
-body.standby .qr-section{display:none}
-body.standby .standby{display:flex}
-body.expired .qr-section,.body\\.expired .pairing{display:none}
-body.expired .expired{display:flex}
-body.done .pairing,body.standby .pairing,body.expired .pairing{display:none!important}
+@keyframes pdot{0%,100%{opacity:1}50%{opacity:.3}}
+.s-expired{
+  display:none;flex-direction:column;align-items:center;gap:.85rem;
+  text-align:center;padding:.5rem 0;
+}
+.icon-exp{
+  width:64px;height:64px;border-radius:50%;
+  background:#fef2f2;
+  display:flex;align-items:center;justify-content:center;
+  margin-bottom:.25rem;
+}
+.icon-exp svg{width:28px;height:28px;stroke:#f87171;stroke-width:2;fill:none;stroke-linecap:round}
+.s-expired h2{font-size:1.1rem;font-weight:700;color:#18181b}
+.s-expired p{font-size:.84rem;color:#71717a;line-height:1.6;max-width:270px}
+body.done .s-qr,body.done .pairing{display:none}
+body.done .s-done{display:flex}
+body.standby .s-qr,body.standby .pairing{display:none}
+body.standby .s-standby{display:flex}
+body.expired .s-qr,body.expired .pairing{display:none}
+body.expired .s-expired{display:flex}
 </style>
 </head>
 <body>
 <div class="card">
-
-  <!-- Logo -->
   <div class="logo">
-    <div class="logo-icon">
+    <div class="logo-mark">
       <svg viewBox="0 0 32 32"><path d="M16 2C8.27 2 2 8.27 2 16c0 2.47.65 4.79 1.79 6.8L2 30l7.4-1.77A13.93 13.93 0 0016 30c7.73 0 14-6.27 14-14S23.73 2 16 2zm7.58 19.42c-.32.9-1.87 1.72-2.56 1.8-.65.08-1.47.11-2.37-.15-.54-.16-1.24-.38-2.12-.74-3.73-1.6-6.16-5.36-6.35-5.61-.18-.24-1.5-2-.1-3.76a2.02 2.02 0 011.48-.67c.18 0 .35 0 .5.01.16.01.38-.06.6.45l.83 2.03c.08.18.13.4.02.64-.1.24-.16.38-.32.58-.16.2-.34.44-.48.6-.16.18-.33.38-.14.74.19.36.85 1.4 1.83 2.27 1.26 1.12 2.32 1.47 2.65 1.63.33.16.52.13.71-.08.2-.21.84-.98 1.06-1.32.22-.33.44-.27.74-.16.3.11 1.9.9 2.23 1.06.33.16.55.24.63.37.08.14.08.8-.24 1.7z"/></svg>
     </div>
-    <span class="logo-text">Evolution<span>API</span></span>
+    <span class="logo-name">Evolution<em>API</em></span>
   </div>
-
-  <!-- QR section -->
-  <div class="qr-section">
-    <div class="status-row">
-      <span class="dot"></span>
-      Aguardando escaneamento
+  <div class="s-qr">
+    <h2 class="qr-title">Conectar WhatsApp</h2>
+    <p class="qr-sub">Abra o WhatsApp, toque em <strong>Dispositivos conectados</strong> e escaneie o código.</p>
+    <div class="qr-box loading" id="qrWrap">
+      <img id="qrImg" src="" alt="QR Code"/>
+      <div class="spin-layer"><div class="spin"></div></div>
     </div>
-
-    <div class="ring-wrap">
-      <!-- progress ring around QR -->
-      <svg class="ring-svg" viewBox="0 0 240 240">
-        <circle class="ring-track" cx="120" cy="120" r="${RING_R}"/>
-        <circle class="ring-bar hidden" id="ringBar" cx="120" cy="120" r="${RING_R}"/>
-      </svg>
-      <!-- QR frame -->
-      <div class="qr-frame loading" id="qrWrap">
-        <img id="qrImg" src="" alt="QR Code"/>
-        <div class="spin-overlay">
-          <svg class="spin-svg" viewBox="0 0 24 24">
-            <circle cx="12" cy="12" r="10" stroke-dasharray="32 10"/>
-          </svg>
-        </div>
-      </div>
+    <div class="prog-track"><div class="prog-bar" id="progBar"></div></div>
+    <div class="pairing" id="pairingSection">
+      <span class="pairing-label">Código de emparelhamento</span>
+      <div class="pairing-code"><span id="p1"></span><span class="sep"> – </span><span id="p2"></span></div>
     </div>
-
-    <p class="instructions">
-      Abra o WhatsApp, toque em <strong>Dispositivos conectados</strong> e escaneie o código acima.
-    </p>
-    <div class="expiry" id="expiry"></div>
+    <div class="link-expiry" id="expiry"></div>
   </div>
-
-  <!-- Pairing code (shown alongside QR when available) -->
-  <div class="pairing" id="pairingSection">
-    <div class="pairing-label">Ou use o código de emparelhamento</div>
-    <div class="pairing-code" id="pairingCode">
-      <span id="p1"></span><span class="pairing-sep">–</span><span id="p2"></span>
-    </div>
-  </div>
-
-  <!-- Connected -->
-  <div class="success">
-    <div class="check-ring">
+  <div class="s-done">
+    <div class="icon-ok">
       <svg viewBox="0 0 24 24"><polyline points="20 6 9 17 4 12"/></svg>
     </div>
-    <h2>Conectado!</h2>
-    <p>WhatsApp conectado com sucesso.<br>Esta janela pode ser fechada.</p>
+    <h2>WhatsApp conectado!</h2>
+    <p>Conexão estabelecida com sucesso.<br>Esta aba pode ser fechada.</p>
   </div>
-
-  <!-- Standby -->
-  <div class="standby">
-    <div class="standby-orb">
-      <svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.93 4.93l1.41 1.41M17.66 17.66l1.41 1.41M2 12h2M20 12h2M4.93 19.07l1.41-1.41M17.66 6.34l1.41-1.41"/><circle cx="12" cy="12" r="8" stroke-dasharray="3 2" fill="none"/></svg>
+  <div class="s-standby">
+    <div class="icon-ok">
+      <svg viewBox="0 0 24 24"><polyline points="20 6 9 17 4 12"/></svg>
     </div>
-    <h2>WhatsApp Conectado</h2>
-    <p>Esta instância está ativa. Quando precisar reconectar, o QR Code aparecerá aqui automaticamente.</p>
-    <div class="expiry" id="standby-expiry"></div>
+    <h2>WhatsApp já está conectado</h2>
+    <p>Esta instância está ativa no momento. Caso a conexão caia, o QR Code aparecerá aqui automaticamente para você reconectar.</p>
+    <div class="standby-badge">Monitorando conexão</div>
+    <div class="link-expiry" id="standby-expiry"></div>
   </div>
-
-  <!-- Expired -->
-  <div class="expired">
-    <div class="expired-orb">
+  <div class="s-expired">
+    <div class="icon-exp">
       <svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>
     </div>
     <h2>Link expirado</h2>
-    <p>O tempo de validade deste link chegou ao fim.<br>Acesse o painel para gerar um novo link.</p>
+    <p>O tempo de validade deste link chegou ao fim. Acesse o painel e gere um novo link para reconectar.</p>
   </div>
-
 </div>
 <script>
 (function(){
   const token = location.pathname.split('/').pop();
   const BASE_URL = ${JSON.stringify(serverUrl)};
-  const QR_LIFETIME = 20000; // ms — estimated Baileys QR validity
-  const RING_C = ${RING_C};
+  const QR_LIFETIME_MS = ${QR_LIFETIME} * 1000;
 
   let expiresAt = null;
   let tickInterval = null;
   let seenWaiting = false;
-  let qrLastChanged = 0;
+  let qrChangedAt = 0;
   let lastQrSrc = '';
 
   function base(){
     return BASE_URL || (location.origin + (location.pathname.split('/qrcode/')[0] || ''));
   }
 
-  function formatTime(ms){
+  function fmtTime(ms){
     const m=Math.floor(ms/60000), s=Math.floor((ms%60000)/1000);
-    return m>0 ? m+'m '+('0'+s).slice(-2)+'s' : s+'s';
+    return m>0 ? m+'m '+('0'+s).slice(-2)+'s' : s+'s';
   }
 
-  function setExpiry(text){
+  function setExpiryText(text){
     ['expiry','standby-expiry'].forEach(id=>{
       const el=document.getElementById(id);
       if(el) el.textContent=text;
     });
   }
 
-  function updateRing(){
-    if(!qrLastChanged) return;
-    const elapsed = Date.now()-qrLastChanged;
-    const progress = Math.max(0, 1-elapsed/QR_LIFETIME);
-    const bar = document.getElementById('ringBar');
+  function updateProgress(){
+    if(!qrChangedAt) return;
+    const bar=document.getElementById('progBar');
     if(!bar) return;
-    bar.style.strokeDashoffset = (RING_C*(1-progress)).toFixed(1);
-    // colour shift: green → amber as it ages
-    if(progress < 0.2){
-      bar.style.stroke='#f97316';
-    } else if(progress < 0.4){
-      bar.style.stroke='#eab308';
-    } else {
-      bar.style.stroke='';
-    }
+    const elapsed=Date.now()-qrChangedAt;
+    const ratio=Math.max(0, 1-elapsed/QR_LIFETIME_MS);
+    bar.style.transform='scaleX('+ratio.toFixed(3)+')';
+    if(ratio < 0.2) bar.style.background='#f87171';
+    else if(ratio < 0.45) bar.style.background='#fbbf24';
+    else bar.style.background='#25d366';
   }
 
   function tick(){
-    // link expiry countdown
     if(expiresAt){
       const diff=expiresAt-Date.now();
-      setExpiry(diff>0 ? 'Link expira em '+formatTime(diff) : '');
+      setExpiryText(diff>0 ? 'Link expira em '+fmtTime(diff) : '');
     }
-    // ring progress
-    updateRing();
+    updateProgress();
   }
 
   function setPairingCode(code){
     const sec=document.getElementById('pairingSection');
-    if(!code||!sec){if(sec)sec.classList.remove('visible');return;}
+    if(!code||!sec){if(sec)sec.classList.remove('on');return;}
     document.getElementById('p1').textContent=code.slice(0,4);
     document.getElementById('p2').textContent=code.slice(4,8);
-    sec.classList.add('visible');
+    sec.classList.add('on');
   }
 
   async function poll(){
@@ -627,40 +561,33 @@ body.done .pairing,body.standby .pairing,body.expired .pairing{display:none!impo
         return;
       }
 
-      // status === 'waiting'
       seenWaiting=true;
       document.body.className='';
-
       const wrap=document.getElementById('qrWrap');
       const img=document.getElementById('qrImg');
-      const bar=document.getElementById('ringBar');
 
       if(d.qrCode){
         if(d.qrCode!==lastQrSrc){
-          // new QR — flash + reset ring
           lastQrSrc=d.qrCode;
-          qrLastChanged=Date.now();
-          img.style.opacity='.3';
+          qrChangedAt=Date.now();
+          img.style.opacity='.25';
           img.src=d.qrCode;
           img.onload=()=>{ img.style.opacity=''; };
-          if(bar){ bar.classList.remove('hidden'); bar.style.strokeDashoffset='0'; }
+          const bar=document.getElementById('progBar');
+          if(bar){ bar.style.transition='none'; bar.style.transform='scaleX(1)'; void bar.offsetWidth; bar.style.transition=''; }
         }
         wrap.classList.remove('loading');
       } else {
         wrap.classList.add('loading');
-        if(bar) bar.classList.add('hidden');
       }
-
       setPairingCode(d.pairingCode||null);
 
-    }catch(e){
-      console.warn('poll error',e);
-    }
+    }catch(e){ console.warn('poll error',e); }
     setTimeout(poll,7000);
   }
 
   poll();
-  tickInterval=setInterval(tick,500);
+  tickInterval=setInterval(tick,250);
 })();
 </script>
 </body>
