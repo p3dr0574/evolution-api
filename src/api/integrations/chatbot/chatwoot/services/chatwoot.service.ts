@@ -1401,8 +1401,14 @@ export class ChatwootService {
       let chatId =
         body.conversation.meta.sender?.identifier || body.conversation.meta.sender?.phone_number?.replace('+', '');
       if (chatId?.includes('@lid')) {
-        // @lid JIDs cannot be used for outgoing messages; prefer the real phone number.
-        chatId = body.conversation.meta.sender?.phone_number?.replace('+', '') || chatId.split('@')[0];
+        const resolvedPhone = body.conversation.meta.sender?.phone_number?.replace('+', '');
+        const lidNumber = chatId.split('@')[0];
+        // Only swap to phone number when it was actually resolved to a different real number.
+        // When phone_number == lidNumber the LID was never resolved; keep the full @lid JID so
+        // createJid passes it through unchanged and Baileys sends via LID directly.
+        if (resolvedPhone && resolvedPhone !== lidNumber) {
+          chatId = resolvedPhone;
+        }
       }
       // Chatwoot to Whatsapp
       const messageReceived = body.content
