@@ -1359,7 +1359,9 @@ export class ChatwootService {
       conversationId: conversation,
       data: {
         content: i18next.t('cw.message.notsent', {
-          error: error ? `_${error.toString()}_` : '',
+          error: error
+            ? `_${error instanceof Error ? error.message : typeof error === 'string' ? error : JSON.stringify(error)}_`
+            : '',
         }),
         message_type: 'outgoing',
         private: true,

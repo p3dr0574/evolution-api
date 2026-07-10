@@ -503,6 +503,13 @@ export class BaileysStartupService extends ChannelStartupService {
       const shouldReconnect = !codesToNotReconnect.includes(statusCode);
       if (shouldReconnect) {
         await this.reportProxyFailure(lastDisconnect?.error);
+        // connectionReplaced (440): another session kicked us out. Reconnecting
+        // immediately races against the dying connection and creates an infinite
+        // replaced loop. A short delay lets the old WebSocket fully close first.
+        if (statusCode === DisconnectReason.connectionReplaced) {
+          this.logger.warn('Connection replaced — waiting 5s before reconnecting');
+          await delay(5000);
+        }
         await this.connectToWhatsapp(this.phoneNumber);
       } else {
         this.sendDataWebhook(Events.STATUS_INSTANCE, {
