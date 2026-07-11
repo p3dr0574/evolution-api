@@ -1400,7 +1400,11 @@ export class ChatwootService {
 
       let chatId =
         body.conversation.meta.sender?.identifier || body.conversation.meta.sender?.phone_number?.replace('+', '');
-      if (chatId?.includes('@lid')) {
+      if (chatId?.includes('@s.whatsapp.net')) {
+        // identifier should never contain the @s.whatsapp.net suffix — strip it so
+        // createJid can apply proper number normalization (Brazilian 9-digit prefix etc.)
+        chatId = chatId.split('@')[0];
+      } else if (chatId?.includes('@lid')) {
         const resolvedPhone = body.conversation.meta.sender?.phone_number?.replace('+', '');
         const lidNumber = chatId.split('@')[0];
         // Only swap to phone number when it was actually resolved to a different real number.
