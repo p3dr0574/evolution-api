@@ -1403,7 +1403,18 @@ export class ChatwootService {
       if (chatId?.includes('@s.whatsapp.net')) {
         // identifier should never contain the @s.whatsapp.net suffix — strip it so
         // createJid can apply proper number normalization (Brazilian 9-digit prefix etc.)
-        chatId = chatId.split('@')[0];
+        const num = chatId.split('@')[0];
+        // Numbers with >13 digits cannot be valid E.164 phone numbers; they are LID aliases
+        // stored with the wrong suffix. Fix them in-flight and self-heal the Chatwoot contact.
+        if (num.length > 13) {
+          chatId = `${num}@lid`;
+          const contactId = body.conversation.meta.sender?.id;
+          if (contactId) {
+            this.updateContact(instance, contactId, { identifier: chatId }).catch(() => null);
+          }
+        } else {
+          chatId = num;
+        }
       } else if (chatId?.includes('@lid')) {
         const resolvedPhone = body.conversation.meta.sender?.phone_number?.replace('+', '');
         const lidNumber = chatId.split('@')[0];
