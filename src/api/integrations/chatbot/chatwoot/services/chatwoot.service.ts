@@ -568,6 +568,78 @@ export class ChatwootService {
     }
   }
 
+  private async healWrongLidIdentifier(
+    instance: InstanceDto,
+    contactId: number,
+    lidJid: string,
+    conversationId: number,
+  ): Promise<void> {
+    const client = await this.clientCw(instance);
+    if (!client) return;
+
+    // Step 1: Try to update the wrong contact's identifier to the correct @lid value.
+    const updateResult = await this.updateContact(instance, contactId, { identifier: lidJid });
+    if (!(updateResult as any)?.__updateError) {
+      this.logger.log(`Self-healed: contact ${contactId} identifier → ${lidJid}`);
+      return;
+    }
+
+    if ((updateResult as any).status !== 422) {
+      this.logger.warn(`healWrongLidIdentifier: update failed (${(updateResult as any).status}) for ${lidJid}`);
+      return;
+    }
+
+    // Step 2: 422 means a contact with identifier=@lid already exists — classic duplicate.
+    const correctContact = await this.findContactByIdentifier(instance, lidJid);
+    if (!correctContact) {
+      this.logger.warn(`healWrongLidIdentifier: @lid contact not found for ${lidJid}`);
+      return;
+    }
+
+    this.logger.log(
+      `Duplicate LID detected: merging @s.whatsapp.net contact (${contactId}) into @lid contact (${correctContact.id})`,
+    );
+
+    // Step 3: Merge — @lid contact is the base (keeps its identity), @s.whatsapp.net is the mergee.
+    const merged = await this.mergeContacts(correctContact.id, contactId);
+    if (merged) {
+      this.logger.log(`Merge successful: contact ${contactId} absorbed into ${correctContact.id}`);
+      return;
+    }
+
+    // Step 4: Merge failed — post a private note in the current conversation so an agent
+    // can handle it manually, with a direct link to the correct contact's latest conversation.
+    this.logger.warn(`Merge failed for duplicate ${lidJid}. Posting fallback note in conversation ${conversationId}.`);
+
+    const baseUrl = this.provider.url.replace(/\/$/, '');
+    const accountId = this.provider.accountId;
+
+    let correctConvUrl = `${baseUrl}/app/accounts/${accountId}/contacts/${correctContact.id}`;
+    try {
+      const convData = await chatwootRequest(this.getClientCwConfig(), {
+        method: 'GET',
+        url: `/api/v1/accounts/${accountId}/contacts/${correctContact.id}/conversations`,
+      });
+      const conversations: any[] = (convData as any)?.payload ?? [];
+      if (conversations.length > 0) {
+        const latest = conversations[0];
+        correctConvUrl = `${baseUrl}/app/accounts/${accountId}/inbox/${latest.inbox_id}/conversations/${latest.id}`;
+      }
+    } catch {
+      // fallback: contact page
+    }
+
+    await client.messages.create({
+      accountId: this.provider.accountId,
+      conversationId,
+      data: {
+        content: `⚠️ *Contato duplicado detectado.*\n\nEste contato possui o mesmo identificador LID (\`${lidJid}\`) que outro contato já cadastrado. O merge automático falhou — verifique manualmente.\n\nConversa do contato correto: ${correctConvUrl}`,
+        message_type: 'outgoing',
+        private: true,
+      },
+    });
+  }
+
   private async mergeBrazilianContacts(contacts: any[]) {
     try {
       const contact = await chatwootRequest(this.getClientCwConfig(), {
@@ -1409,8 +1481,9 @@ export class ChatwootService {
         if (num.length > 13) {
           chatId = `${num}@lid`;
           const contactId = body.conversation.meta.sender?.id;
-          if (contactId) {
-            this.updateContact(instance, contactId, { identifier: chatId }).catch(() => null);
+          const conversationId = body.conversation?.id;
+          if (contactId && conversationId) {
+            this.healWrongLidIdentifier(instance, contactId, chatId, conversationId).catch(() => null);
           }
         } else {
           chatId = num;
